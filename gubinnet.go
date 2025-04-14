@@ -271,7 +271,6 @@ func (g *GubinNET) Start() {
 	go func() {
 		<-sigChan
 		g.logger.Log("Получен сигнал завершения. Начинаем корректное завершение работы...", Info)
-
 		// Остановка всех .NET приложений
 		for _, host := range g.config.VirtualHosts {
 			if host.AppProcess != nil {
@@ -279,7 +278,6 @@ func (g *GubinNET) Start() {
 				host.AppProcess.Signal(syscall.SIGTERM)
 			}
 		}
-
 		time.Sleep(5 * time.Second)
 		g.logger.Log("Сервер успешно остановлен.", Info)
 		os.Exit(0)
@@ -294,13 +292,12 @@ func (g *GubinNET) startDotNetApp(host *VirtualHost) error {
 		fmt.Sprintf("ASPNETCORE_URLS=http://0.0.0.0:%d", host.InternalPort),
 		"ASPNETCORE_ENVIRONMENT=Production",
 		"DOTNET_PRINT_TELEMETRY_MESSAGE=false",
+		"ASPNETCORE_SERVER_HEADER=", // Отключаем добавление заголовка Server в Kestrel
 	)
-
 	err := cmd.Start()
 	if err != nil {
 		return err
 	}
-
 	host.AppProcess = cmd.Process
 	g.logger.Log(fmt.Sprintf("Запущено .NET приложение для хоста %s PID: %d", host.Domain, cmd.Process.Pid), Info)
 	return nil
@@ -308,8 +305,13 @@ func (g *GubinNET) startDotNetApp(host *VirtualHost) error {
 
 // handleRequest handles incoming HTTP requests
 func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
-	serverInfo := "GubinNET/1.0;"
+	// Удаляем все существующие заголовки Server
+	w.Header().Del("Server")
+
+	// Устанавливаем свой заголовок Server
+	serverInfo := "GubinNET/1.1"
 	w.Header().Set("Server", serverInfo)
+
 	hostHeader := strings.Split(r.Host, ":")[0]
 	host, exists := g.config.VirtualHosts[hostHeader]
 	if !exists {
@@ -352,6 +354,7 @@ func (g *GubinNET) proxyRequest(w http.ResponseWriter, r *http.Request, proxyUrl
 		return
 	}
 	defer resp.Body.Close()
+	resp.Header.Del("Server")
 	for key, values := range resp.Header {
 		for _, value := range values {
 			w.Header().Add(key, value)
@@ -387,6 +390,7 @@ func (g *GubinNET) serveFile(w http.ResponseWriter, filePath string) {
 		g.serveErrorPage(w, nil, http.StatusInternalServerError, "Internal Server Error.")
 		return
 	}
+	w.Header().Del("Server")
 	w.Header().Set("Content-Type", getContentType(filePath))
 	w.Write(content)
 }
@@ -410,7 +414,8 @@ func getContentType(filePath string) string {
 
 // serveErrorPage generates standard error pages with server signature
 func (g *GubinNET) serveErrorPage(w http.ResponseWriter, r *http.Request, statusCode int, message string) {
-	w.Header().Set("Server", "GubinNET/1.0")
+	w.Header().Del("Server") // Удаляем возможные дубликаты
+	w.Header().Set("Server", "GubinNET/1.1")
 	w.WriteHeader(statusCode)
 	html := fmt.Sprintf(`
 <!DOCTYPE html>
@@ -428,7 +433,7 @@ func (g *GubinNET) serveErrorPage(w http.ResponseWriter, r *http.Request, status
 <body>
     <h1>Error %d</h1>
     <p>%s</p>
-    <p>Server: GubinNET/1.0</p>
+    <p>Server: GubinNET/1.1</p>
 </body>
 </html>
 `, statusCode, statusCode, message)
