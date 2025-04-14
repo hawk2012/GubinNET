@@ -4,10 +4,9 @@ set GOOS=linux
 set GOARCH=amd64
 
 :: Переходим в директорию с исходным кодом (если нужно)
-cd /d C:\Users\User\Desktop\GubinNET\src
 
 :: Команда сборки Go-приложения
-go build -o gubinnet
+go build -o gubinnet -ldflags="-s -w" -gcflags="all=-N -l" -trimpath
 
 :: Очищаем переменные окружения после завершения
 set GOOS=
