@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -93,6 +94,9 @@ type VirtualHost struct {
 	InternalPort   int
 	SSLCertificate string
 	SSLKey         string
+	AppMode        string
+	DllPath        string
+	AppProcess     *os.Process
 }
 
 // PHPSettings represents PHP configuration
@@ -152,6 +156,10 @@ func (c *ConfigParser) Load(filePath string) error {
 				currentHost.SSLCertificate = value
 			case "SSLKey":
 				currentHost.SSLKey = value
+			case "AppMode":
+				currentHost.AppMode = value
+			case "DllPath":
+				currentHost.DllPath = value
 			}
 		} else if c.PHPConfig != nil {
 			switch key {
@@ -198,6 +206,18 @@ type GubinNET struct {
 func (g *GubinNET) Start() {
 	g.logger.Log("Запуск сервера...", Info)
 	g.cache = make(map[string][]byte)
+
+	// Запуск .NET приложений
+	for _, host := range g.config.VirtualHosts {
+		if host.AppMode == "dotnet" && host.DllPath != "" && host.InternalPort != 0 {
+			go func(h *VirtualHost) {
+				err := g.startDotNetApp(h)
+				if err != nil {
+					g.logger.Log(fmt.Sprintf("Не удалось запустить приложение для хоста %s: %v", h.Domain, err), Error)
+				}
+			}(host)
+		}
+	}
 
 	// Настройка HTTP-сервера с поддержкой SNI
 	httpServer := &http.Server{
@@ -251,10 +271,39 @@ func (g *GubinNET) Start() {
 	go func() {
 		<-sigChan
 		g.logger.Log("Получен сигнал завершения. Начинаем корректное завершение работы...", Info)
+
+		// Остановка всех .NET приложений
+		for _, host := range g.config.VirtualHosts {
+			if host.AppProcess != nil {
+				g.logger.Log(fmt.Sprintf("Остановка приложения для хоста %s PID: %d", host.Domain, host.AppProcess.Pid), Info)
+				host.AppProcess.Signal(syscall.SIGTERM)
+			}
+		}
+
 		time.Sleep(5 * time.Second)
 		g.logger.Log("Сервер успешно остановлен.", Info)
 		os.Exit(0)
 	}()
+}
+
+// startDotNetApp запускает .NET приложение
+func (g *GubinNET) startDotNetApp(host *VirtualHost) error {
+	cmd := exec.Command("dotnet", host.DllPath)
+	cmd.Dir = filepath.Dir(host.DllPath)
+	cmd.Env = append(os.Environ(),
+		fmt.Sprintf("ASPNETCORE_URLS=http://0.0.0.0:%d", host.InternalPort),
+		"ASPNETCORE_ENVIRONMENT=Production",
+		"DOTNET_PRINT_TELEMETRY_MESSAGE=false",
+	)
+
+	err := cmd.Start()
+	if err != nil {
+		return err
+	}
+
+	host.AppProcess = cmd.Process
+	g.logger.Log(fmt.Sprintf("Запущено .NET приложение для хоста %s PID: %d", host.Domain, cmd.Process.Pid), Info)
+	return nil
 }
 
 // handleRequest handles incoming HTTP requests
@@ -268,15 +317,14 @@ func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Если DefaultProxy задан, проксируем запрос
-	if host.DefaultProxy != "" {
-		g.proxyRequest(w, r, host.DefaultProxy)
-		return
-	}
-
-	// Если InternalPort задан и не используется PHP, проксируем запрос на InternalPort
-	if host.InternalPort != 0 && !g.config.PHPConfig.Enabled {
-		proxyUrl := fmt.Sprintf("http://127.0.0.1:%d", host.InternalPort)
+	// Если DefaultProxy задан или есть InternalPort и AppMode=dotnet
+	if host.DefaultProxy != "" || (host.AppMode == "dotnet" && host.InternalPort != 0) {
+		var proxyUrl string
+		if host.DefaultProxy != "" {
+			proxyUrl = host.DefaultProxy
+		} else {
+			proxyUrl = fmt.Sprintf("http://127.0.0.1:%d", host.InternalPort)
+		}
 		g.proxyRequest(w, r, proxyUrl)
 		return
 	}
