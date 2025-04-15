@@ -1,7 +1,10 @@
 package main
 
 import (
+	"compress/gzip"
+	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,9 +17,12 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-// LogLevel defines logging levels
 type LogLevel int
 
 const (
@@ -26,38 +32,66 @@ const (
 	Debug
 )
 
-// Logger handles logging functionality
+var (
+	requestsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "http_requests_total",
+		Help: "Total number of HTTP requests",
+	}, []string{"method", "path", "status"})
+	requestDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "http_request_duration_seconds",
+		Help:    "Duration of HTTP requests",
+		Buckets: []float64{0.1, 0.5, 1, 2.5, 5, 10},
+	}, []string{"method", "path"})
+	activeConnections = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "http_active_connections",
+		Help: "Number of active HTTP connections",
+	})
+)
+
 type Logger struct {
 	logFilePath string
+	mu          sync.Mutex
 }
 
-// NewLogger creates a new logger instance
 func NewLogger(logDirectory string) *Logger {
 	absLogDir, err := filepath.Abs(logDirectory)
 	if err != nil {
-		fmt.Println("Неверный путь к логам:", err)
+		fmt.Println("Invalid log path:", err)
 		return nil
 	}
 	if _, err := os.Stat(absLogDir); os.IsNotExist(err) {
 		os.MkdirAll(absLogDir, 0755)
 	}
-	logFileName := fmt.Sprintf("log_%s.txt", time.Now().Format("20060102"))
+	logFileName := fmt.Sprintf("log_%s.json", time.Now().Format("20060102"))
 	logFilePath := filepath.Join(absLogDir, logFileName)
 	return &Logger{logFilePath: logFilePath}
 }
 
-// Log writes a message to the log file and console
-func (l *Logger) Log(message string, level LogLevel) {
+func (l *Logger) Log(message string, level LogLevel, fields map[string]interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	levelStr := levelToString(level)
-	logEntry := fmt.Sprintf("[%s] [%s] %s\n", time.Now().Format("2006-01-02 15:04:05"), levelStr, message)
-	fmt.Print(logEntry)
+	logEntry := map[string]interface{}{
+		"timestamp": time.Now().Format(time.RFC3339),
+		"level":     levelStr,
+		"message":   message,
+	}
+	for k, v := range fields {
+		logEntry[k] = v
+	}
+	jsonData, err := json.Marshal(logEntry)
+	if err != nil {
+		fmt.Println("Error marshaling log entry:", err)
+		return
+	}
+	fmt.Println(string(jsonData))
 	file, err := os.OpenFile(l.logFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
-		fmt.Println("Ошибка записи в лог:", err)
+		fmt.Println("Error writing to log:", err)
 		return
 	}
 	defer file.Close()
-	file.WriteString(logEntry)
+	file.WriteString(string(jsonData) + "\n")
 }
 
 func levelToString(level LogLevel) string {
@@ -75,17 +109,20 @@ func levelToString(level LogLevel) string {
 	}
 }
 
-// ConfigParser handles configuration parsing
 type ConfigParser struct {
-	ListenHTTP   int
-	ListenHTTPS  int
-	ConfigPath   string
-	VirtualHosts map[string]*VirtualHost
-	PHPConfig    *PHPSettings
-	logger       *Logger
+	ListenHTTP     int
+	ListenHTTPS    int
+	ConfigPath     string
+	VirtualHosts   map[string]*VirtualHost
+	PHPConfig      *PHPSettings
+	MaxRequestSize int64
+	RequestTimeout time.Duration
+	EnableMetrics  bool
+	EnableGzip     bool
+	TrustedProxies []string
+	logger         *Logger
 }
 
-// VirtualHost represents a virtual host configuration
 type VirtualHost struct {
 	Domain         string
 	BasePath       string
@@ -97,17 +134,28 @@ type VirtualHost struct {
 	AppMode        string
 	DllPath        string
 	AppProcess     *os.Process
+	SPAFallback    string
+	BasicAuth      map[string]string
+	CORS           CORSSettings
+	RateLimit      int
 }
 
-// PHPSettings represents PHP configuration
+type CORSSettings struct {
+	AllowedOrigins []string
+	AllowedMethods []string
+	AllowedHeaders []string
+}
+
 type PHPSettings struct {
 	Enabled     bool
 	BinaryPath  string
 	WebRootPath string
 }
 
-// Load reads and parses the configuration file
 func (c *ConfigParser) Load(filePath string) error {
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		return fmt.Errorf("config file not found: %s", filePath)
+	}
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return err
@@ -124,9 +172,15 @@ func (c *ConfigParser) Load(filePath string) error {
 			section := line[1 : len(line)-1]
 			if strings.HasPrefix(section, "Host:") {
 				hostName := section[len("Host:"):]
-				currentHost = &VirtualHost{Domain: hostName}
+				currentHost = &VirtualHost{
+					Domain:    hostName,
+					BasicAuth: make(map[string]string),
+					CORS: CORSSettings{
+						AllowedMethods: []string{"GET", "POST", "HEAD"},
+					},
+				}
 				c.VirtualHosts[hostName] = currentHost
-				c.logger.Log(fmt.Sprintf("Загружен хост: %s", hostName), Info)
+				c.logger.Log("Loaded host", Info, map[string]interface{}{"host": hostName})
 			} else if section == "PHP" {
 				c.PHPConfig = &PHPSettings{}
 			}
@@ -147,8 +201,8 @@ func (c *ConfigParser) Load(filePath string) error {
 				currentHost.DefaultProxy = value
 			case "InternalPort":
 				port, err := strconv.Atoi(value)
-				if err != nil {
-					c.logger.Log(fmt.Sprintf("Неверное значение InternalPort: %s", value), Error)
+				if err != nil || port <= 0 || port > 65535 {
+					c.logger.Log("Invalid InternalPort", Error, map[string]interface{}{"value": value, "error": err})
 					continue
 				}
 				currentHost.InternalPort = port
@@ -160,6 +214,24 @@ func (c *ConfigParser) Load(filePath string) error {
 				currentHost.AppMode = value
 			case "DllPath":
 				currentHost.DllPath = value
+			case "SPAFallback":
+				currentHost.SPAFallback = value
+			case "BasicAuth":
+				authParts := strings.SplitN(value, ":", 2)
+				if len(authParts) == 2 {
+					currentHost.BasicAuth[authParts[0]] = authParts[1]
+				}
+			case "CORSAllowedOrigins":
+				currentHost.CORS.AllowedOrigins = strings.Split(value, ",")
+			case "CORSAllowedHeaders":
+				currentHost.CORS.AllowedHeaders = strings.Split(value, ",")
+			case "RateLimit":
+				rateLimit, err := strconv.Atoi(value)
+				if err != nil {
+					c.logger.Log("Invalid RateLimit", Error, map[string]interface{}{"value": value, "error": err})
+					continue
+				}
+				currentHost.RateLimit = rateLimit
 			}
 		} else if c.PHPConfig != nil {
 			switch key {
@@ -168,7 +240,7 @@ func (c *ConfigParser) Load(filePath string) error {
 			case "BinaryPath":
 				absBinPath, err := filepath.Abs(value)
 				if err != nil {
-					c.logger.Log(fmt.Sprintf("Неверный путь для PHP BinaryPath: %s", value), Error)
+					c.logger.Log("Invalid PHP BinaryPath", Error, map[string]interface{}{"path": value, "error": err})
 					continue
 				}
 				c.PHPConfig.BinaryPath = absBinPath
@@ -184,57 +256,82 @@ func (c *ConfigParser) Load(filePath string) error {
 			case "ConfigPath":
 				absConfigPath, err := filepath.Abs(value)
 				if err != nil {
-					c.logger.Log(fmt.Sprintf("Неверный путь для ConfigPath: %s", value), Error)
+					c.logger.Log("Invalid ConfigPath", Error, map[string]interface{}{"path": value, "error": err})
 					continue
 				}
 				c.ConfigPath = absConfigPath
+			case "MaxRequestSize":
+				size, err := strconv.ParseInt(value, 10, 64)
+				if err == nil {
+					c.MaxRequestSize = size
+				}
+			case "RequestTimeout":
+				timeout, err := time.ParseDuration(value)
+				if err == nil {
+					c.RequestTimeout = timeout
+				}
+			case "EnableMetrics":
+				c.EnableMetrics, _ = strconv.ParseBool(value)
+			case "EnableGzip":
+				c.EnableGzip, _ = strconv.ParseBool(value)
+			case "TrustedProxies":
+				c.TrustedProxies = strings.Split(value, ",")
 			}
 		}
 	}
 	return nil
 }
 
-// GubinNET represents the main server structure
 type GubinNET struct {
 	config *ConfigParser
 	logger *Logger
-	cache  map[string][]byte
+	cache  map[string]*cacheEntry
 	mu     sync.Mutex
 }
 
-// Start starts the HTTP and HTTPS servers with SNI support
-func (g *GubinNET) Start() {
-	g.logger.Log("Запуск сервера...", Info)
-	g.cache = make(map[string][]byte)
+type cacheEntry struct {
+	content     []byte
+	modTime     time.Time
+	size        int64
+	contentType string
+}
 
-	// Запуск .NET приложений
+func (g *GubinNET) Start() {
+	g.logger.Log("Starting server", Info, nil)
+	g.cache = make(map[string]*cacheEntry)
+
 	for _, host := range g.config.VirtualHosts {
 		if host.AppMode == "dotnet" && host.DllPath != "" && host.InternalPort != 0 {
 			go func(h *VirtualHost) {
 				err := g.startDotNetApp(h)
 				if err != nil {
-					g.logger.Log(fmt.Sprintf("Не удалось запустить приложение для хоста %s: %v", h.Domain, err), Error)
+					g.logger.Log("Failed to start .NET app", Error, map[string]interface{}{
+						"host":  h.Domain,
+						"error": err,
+					})
 				}
 			}(host)
 		}
 	}
 
-	// Настройка HTTP-сервера с поддержкой SNI
 	httpServer := &http.Server{
-		Addr: fmt.Sprintf(":%d", g.config.ListenHTTP),
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			g.handleRequest(w, r)
-		}),
+		Addr:         fmt.Sprintf(":%d", g.config.ListenHTTP),
+		Handler:      g.recoveryMiddleware(g.loggingMiddleware(g.metricsMiddleware(g.handleRequest))),
+		ReadTimeout:  g.config.RequestTimeout,
+		WriteTimeout: g.config.RequestTimeout,
 	}
 	go func() {
-		g.logger.Log(fmt.Sprintf("HTTP сервер запущен на порту %d с поддержкой SNI.", g.config.ListenHTTP), Info)
+		g.logger.Log("HTTP server started", Info, map[string]interface{}{
+			"port": g.config.ListenHTTP,
+		})
 		err := httpServer.ListenAndServe()
-		if err != nil {
-			g.logger.Log(fmt.Sprintf("Ошибка запуска HTTP сервера: %v", err), Error)
+		if err != nil && err != http.ErrServerClosed {
+			g.logger.Log("HTTP server error", Error, map[string]interface{}{
+				"error": err,
+			})
 		}
 	}()
 
-	// Настройка HTTPS-сервера с поддержкой SNI
 	tlsConfig := &tls.Config{
 		MinVersion: tls.VersionTLS12,
 		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
@@ -244,47 +341,194 @@ func (g *GubinNET) Start() {
 			}
 			cert, err := tls.LoadX509KeyPair(host.SSLCertificate, host.SSLKey)
 			if err != nil {
-				g.logger.Log(fmt.Sprintf("Ошибка загрузки сертификата для хоста %s: %v", hello.ServerName, err), Error)
+				g.logger.Log("Failed to load certificate", Error, map[string]interface{}{
+					"host":  hello.ServerName,
+					"error": err,
+				})
 				return nil, err
 			}
 			return &cert, nil
 		},
+		NextProtos: []string{"h2", "http/1.1"},
 	}
 	httpsServer := &http.Server{
-		Addr:      fmt.Sprintf(":%d", g.config.ListenHTTPS),
-		TLSConfig: tlsConfig,
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			g.handleRequest(w, r)
-		}),
+		Addr:         fmt.Sprintf(":%d", g.config.ListenHTTPS),
+		TLSConfig:    tlsConfig,
+		Handler:      g.recoveryMiddleware(g.loggingMiddleware(g.metricsMiddleware(g.handleRequest))),
+		ReadTimeout:  g.config.RequestTimeout,
+		WriteTimeout: g.config.RequestTimeout,
 	}
 	go func() {
-		g.logger.Log(fmt.Sprintf("HTTPS сервер запущен на порту %d с поддержкой SNI.", g.config.ListenHTTPS), Info)
+		g.logger.Log("HTTPS server started", Info, map[string]interface{}{
+			"port": g.config.ListenHTTPS,
+		})
 		err := httpsServer.ListenAndServeTLS("", "")
-		if err != nil {
-			g.logger.Log(fmt.Sprintf("Ошибка запуска HTTPS сервера: %v", err), Error)
+		if err != nil && err != http.ErrServerClosed {
+			g.logger.Log("HTTPS server error", Error, map[string]interface{}{
+				"error": err,
+			})
 		}
 	}()
 
-	// Обработка сигналов завершения
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	var metricsServer *http.Server
+	if g.config.EnableMetrics {
+		go func() {
+			metricsMux := http.NewServeMux()
+			metricsMux.Handle("/metrics", promhttp.Handler())
+			metricsServer = &http.Server{
+				Addr:    ":9090",
+				Handler: metricsMux,
+			}
+			g.logger.Log("Metrics server started", Info, map[string]interface{}{
+				"port": 9090,
+			})
+			err := metricsServer.ListenAndServe()
+			if err != nil && err != http.ErrServerClosed {
+				g.logger.Log("Metrics server error", Error, map[string]interface{}{
+					"error": err,
+				})
+			}
+		}()
+	}
+
+	var healthServer *http.Server
 	go func() {
-		<-sigChan
-		g.logger.Log("Получен сигнал завершения. Начинаем корректное завершение работы...", Info)
-		// Остановка всех .NET приложений
-		for _, host := range g.config.VirtualHosts {
-			if host.AppProcess != nil {
-				g.logger.Log(fmt.Sprintf("Остановка приложения для хоста %s PID: %d", host.Domain, host.AppProcess.Pid), Info)
-				host.AppProcess.Signal(syscall.SIGTERM)
+		healthMux := http.NewServeMux()
+		healthMux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("OK"))
+		})
+		healthServer = &http.Server{
+			Addr:    ":8081",
+			Handler: healthMux,
+		}
+		g.logger.Log("Health server started", Info, map[string]interface{}{
+			"port": 8081,
+		})
+		err := healthServer.ListenAndServe()
+		if err != nil && err != http.ErrServerClosed {
+			g.logger.Log("Health server error", Error, map[string]interface{}{
+				"error": err,
+			})
+		}
+	}()
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	go func() {
+		for {
+			sig := <-sigChan
+			switch sig {
+			case syscall.SIGHUP:
+				g.logger.Log("Reloading configuration", Info, nil)
+				err := g.config.Load(g.config.ConfigPath)
+				if err != nil {
+					g.logger.Log("Failed to reload config", Error, map[string]interface{}{
+						"error": err,
+					})
+				}
+			case os.Interrupt, syscall.SIGTERM:
+				g.logger.Log("Shutting down server", Info, nil)
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				httpServer.Shutdown(ctx)
+				httpsServer.Shutdown(ctx)
+				if g.config.EnableMetrics {
+					metricsServer.Shutdown(ctx)
+				}
+				healthServer.Shutdown(ctx)
+				for _, host := range g.config.VirtualHosts {
+					if host.AppProcess != nil {
+						g.logger.Log("Stopping .NET app", Info, map[string]interface{}{
+							"host": host.Domain,
+							"pid":  host.AppProcess.Pid,
+						})
+						host.AppProcess.Signal(syscall.SIGTERM)
+					}
+				}
+				g.logger.Log("Server gracefully stopped", Info, nil)
+				os.Exit(0)
 			}
 		}
-		time.Sleep(5 * time.Second)
-		g.logger.Log("Сервер успешно остановлен.", Info)
-		os.Exit(0)
 	}()
 }
 
-// startDotNetApp запускает .NET приложение
+func (g *GubinNET) recoveryMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if err := recover(); err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				g.logger.Log("Recovered from panic", Error, map[string]interface{}{
+					"error": err,
+					"path":  r.URL.Path,
+				})
+			}
+		}()
+		next(w, r)
+	}
+}
+
+func (g *GubinNET) loggingMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		requestID := r.Header.Get("X-Request-ID")
+		if requestID == "" {
+			requestID = fmt.Sprintf("%d", time.Now().UnixNano())
+		}
+		g.logger.Log("Request started", Info, map[string]interface{}{
+			"request_id": requestID,
+			"method":     r.Method,
+			"path":       r.URL.Path,
+			"remote":     r.RemoteAddr,
+			"user_agent": r.UserAgent(),
+		})
+		w.Header().Set("X-Request-ID", requestID)
+		ww := &responseWriterWrapper{w: w}
+		next(ww, r)
+		g.logger.Log("Request completed", Info, map[string]interface{}{
+			"request_id":  requestID,
+			"method":      r.Method,
+			"path":        r.URL.Path,
+			"status":      ww.status,
+			"duration_ms": time.Since(start).Milliseconds(),
+		})
+	}
+}
+
+func (g *GubinNET) metricsMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		activeConnections.Inc()
+		defer activeConnections.Dec()
+		ww := &responseWriterWrapper{w: w}
+		next(ww, r)
+		duration := time.Since(start).Seconds()
+		requestDuration.WithLabelValues(r.Method, r.URL.Path).Observe(duration)
+		requestsTotal.WithLabelValues(r.Method, r.URL.Path, strconv.Itoa(ww.status)).Inc()
+	}
+}
+
+type responseWriterWrapper struct {
+	w      http.ResponseWriter
+	status int
+}
+
+func (w *responseWriterWrapper) Header() http.Header {
+	return w.w.Header()
+}
+
+func (w *responseWriterWrapper) Write(b []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.w.Write(b)
+}
+
+func (w *responseWriterWrapper) WriteHeader(statusCode int) {
+	w.status = statusCode
+	w.w.WriteHeader(statusCode)
+}
+
 func (g *GubinNET) startDotNetApp(host *VirtualHost) error {
 	cmd := exec.Command("dotnet", host.DllPath)
 	cmd.Dir = filepath.Dir(host.DllPath)
@@ -292,34 +536,88 @@ func (g *GubinNET) startDotNetApp(host *VirtualHost) error {
 		fmt.Sprintf("ASPNETCORE_URLS=http://0.0.0.0:%d", host.InternalPort),
 		"ASPNETCORE_ENVIRONMENT=Production",
 		"DOTNET_PRINT_TELEMETRY_MESSAGE=false",
-		"ASPNETCORE_SERVER_HEADER=", // Отключаем добавление заголовка Server в Kestrel
+		"ASPNETCORE_SERVER_HEADER=",
 	)
 	err := cmd.Start()
 	if err != nil {
 		return err
 	}
 	host.AppProcess = cmd.Process
-	g.logger.Log(fmt.Sprintf("Запущено .NET приложение для хоста %s PID: %d", host.Domain, cmd.Process.Pid), Info)
+	g.logger.Log("Started .NET app", Info, map[string]interface{}{
+		"host": host.Domain,
+		"pid":  cmd.Process.Pid,
+	})
 	return nil
 }
 
-// handleRequest handles incoming HTTP requests
 func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
-	// Удаляем все существующие заголовки Server
 	w.Header().Del("Server")
-
-	// Устанавливаем свой заголовок Server
-	serverInfo := "GubinNET/1.1"
-	w.Header().Set("Server", serverInfo)
-
+	w.Header().Set("Server", "GubinNET/1.1")
+	if g.config.MaxRequestSize > 0 {
+		r.Body = http.MaxBytesReader(w, r.Body, g.config.MaxRequestSize)
+	}
+	if strings.Contains(r.URL.Path, "../") {
+		g.serveErrorPage(w, r, http.StatusBadRequest, "Invalid URL path")
+		return
+	}
 	hostHeader := strings.Split(r.Host, ":")[0]
 	host, exists := g.config.VirtualHosts[hostHeader]
 	if !exists {
-		g.serveErrorPage(w, r, http.StatusNotFound, "Host not found.")
+		g.serveErrorPage(w, r, http.StatusNotFound, "Host not found")
 		return
 	}
 
-	// Если DefaultProxy задан или есть InternalPort и AppMode=dotnet
+	if host.RateLimit > 0 {
+		ip := r.RemoteAddr
+		if proxyIndex := strings.Index(ip, ","); proxyIndex != -1 {
+			ip = ip[:proxyIndex]
+		}
+		ip = strings.TrimSpace(strings.Split(ip, ":")[0])
+
+		// Simple rate limiting logic
+		clientKey := ip + ":" + host.Domain
+		rateLimiterLock.Lock()
+		if _, exists := rateLimiter[clientKey]; !exists {
+			rateLimiter[clientKey] = time.Now()
+		} else {
+			if time.Since(rateLimiter[clientKey]) < time.Second/time.Duration(host.RateLimit) {
+				g.serveErrorPage(w, r, http.StatusTooManyRequests, "Rate limit exceeded")
+				return
+			}
+			rateLimiter[clientKey] = time.Now()
+		}
+		rateLimiterLock.Unlock()
+	}
+
+	if len(host.BasicAuth) > 0 {
+		username, password, ok := r.BasicAuth()
+		if !ok || host.BasicAuth[username] != password {
+			w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`)
+			g.serveErrorPage(w, r, http.StatusUnauthorized, "Unauthorized")
+			return
+		}
+	}
+
+	if len(host.CORS.AllowedOrigins) > 0 {
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			for _, allowed := range host.CORS.AllowedOrigins {
+				if allowed == "*" || allowed == origin {
+					w.Header().Set("Access-Control-Allow-Origin", origin)
+					if r.Method == "OPTIONS" {
+						w.Header().Set("Access-Control-Allow-Methods", strings.Join(host.CORS.AllowedMethods, ","))
+						if len(host.CORS.AllowedHeaders) > 0 {
+							w.Header().Set("Access-Control-Allow-Headers", strings.Join(host.CORS.AllowedHeaders, ","))
+						}
+						w.WriteHeader(http.StatusNoContent)
+						return
+					}
+					break
+				}
+			}
+		}
+	}
+
 	if host.DefaultProxy != "" || (host.AppMode == "dotnet" && host.InternalPort != 0) {
 		var proxyUrl string
 		if host.DefaultProxy != "" {
@@ -331,30 +629,37 @@ func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// В противном случае обслуживаем файлы или SPA
 	g.serveFileOrSpa(w, r, host)
 }
 
-// proxyRequest proxies the request to another server
 func (g *GubinNET) proxyRequest(w http.ResponseWriter, r *http.Request, proxyUrl string) {
-	client := &http.Client{}
+	client := &http.Client{
+		Timeout: g.config.RequestTimeout,
+		Transport: &http.Transport{
+			ResponseHeaderTimeout: g.config.RequestTimeout / 2,
+		},
+	}
 	req, err := http.NewRequest(r.Method, proxyUrl+r.URL.RequestURI(), r.Body)
 	if err != nil {
-		g.serveErrorPage(w, r, http.StatusBadGateway, "Proxy error.")
+		g.serveErrorPage(w, r, http.StatusBadGateway, "Proxy error")
+		r.Body.Close()
 		return
 	}
+	defer req.Body.Close()
+
 	for key, values := range r.Header {
 		for _, value := range values {
 			req.Header.Add(key, value)
 		}
 	}
+
 	resp, err := client.Do(req)
 	if err != nil {
-		g.serveErrorPage(w, r, http.StatusBadGateway, "Proxy error.")
+		g.serveErrorPage(w, r, http.StatusBadGateway, "Proxy error")
 		return
 	}
 	defer resp.Body.Close()
-	resp.Header.Del("Server")
+
 	for key, values := range resp.Header {
 		for _, value := range values {
 			w.Header().Add(key, value)
@@ -364,58 +669,132 @@ func (g *GubinNET) proxyRequest(w http.ResponseWriter, r *http.Request, proxyUrl
 	io.Copy(w, resp.Body)
 }
 
-// serveFileOrSpa serves static files or falls back to SPA
 func (g *GubinNET) serveFileOrSpa(w http.ResponseWriter, r *http.Request, host *VirtualHost) {
 	webRootPath := host.WebRootPath
 	if webRootPath == "" {
 		webRootPath = host.BasePath
 	}
-	fullPath := filepath.Join(webRootPath, strings.TrimLeft(r.URL.Path, "/"))
-	if fileInfo, err := os.Stat(fullPath); err == nil && !fileInfo.IsDir() {
-		g.serveFile(w, fullPath)
+	requestPath := filepath.Clean(strings.TrimLeft(r.URL.Path, "/"))
+	fullPath := filepath.Join(webRootPath, requestPath)
+	fileInfo, err := os.Stat(fullPath)
+	if err == nil && !fileInfo.IsDir() {
+		g.serveFile(w, r, fullPath, fileInfo)
 		return
 	}
-	spaFallbackPath := filepath.Join(webRootPath, "index.html")
-	if _, err := os.Stat(spaFallbackPath); err == nil {
-		g.serveFile(w, spaFallbackPath)
-		return
+	if host.SPAFallback != "" {
+		spaPath := filepath.Join(webRootPath, host.SPAFallback)
+		if _, err := os.Stat(spaPath); err == nil {
+			g.serveFile(w, r, spaPath, nil)
+			return
+		}
 	}
-	g.serveErrorPage(w, r, http.StatusNotFound, "File Not Found.")
+	g.serveErrorPage(w, r, http.StatusNotFound, "File Not Found")
 }
 
-// serveFile serves a file with appropriate content type
-func (g *GubinNET) serveFile(w http.ResponseWriter, filePath string) {
-	content, err := os.ReadFile(filePath)
-	if err != nil {
-		g.serveErrorPage(w, nil, http.StatusInternalServerError, "Internal Server Error.")
+func (g *GubinNET) serveFile(w http.ResponseWriter, r *http.Request, filePath string, fileInfo os.FileInfo) {
+	g.mu.Lock()
+	cached, found := g.cache[filePath]
+	g.mu.Unlock()
+	if !found || (fileInfo != nil && fileInfo.ModTime().After(cached.modTime)) {
+		if fileInfo == nil {
+			var err error
+			fileInfo, err = os.Stat(filePath)
+			if err != nil {
+				g.serveErrorPage(w, r, http.StatusInternalServerError, "Internal Server Error")
+				return
+			}
+		}
+		if fileInfo.Size() > g.config.MaxRequestSize {
+			g.serveErrorPage(w, r, http.StatusRequestEntityTooLarge, "File too large")
+			return
+		}
+		content, err := os.ReadFile(filePath)
+		if err != nil {
+			g.serveErrorPage(w, r, http.StatusInternalServerError, "Internal Server Error")
+			return
+		}
+		cached = &cacheEntry{
+			content:     content,
+			modTime:     fileInfo.ModTime(),
+			size:        fileInfo.Size(),
+			contentType: getContentType(filePath),
+		}
+		g.mu.Lock()
+		g.cache[filePath] = cached
+		g.mu.Unlock()
+	}
+	w.Header().Set("Content-Type", cached.contentType)
+	w.Header().Set("Content-Length", strconv.FormatInt(cached.size, 10))
+	w.Header().Set("Last-Modified", cached.modTime.Format(http.TimeFormat))
+	etag := fmt.Sprintf(`"%x-%x"`, cached.modTime.Unix(), cached.size)
+	w.Header().Set("ETag", etag)
+	if match := r.Header.Get("If-None-Match"); match == etag {
+		w.WriteHeader(http.StatusNotModified)
 		return
 	}
-	w.Header().Del("Server")
-	w.Header().Set("Content-Type", getContentType(filePath))
-	w.Write(content)
+	if modSince := r.Header.Get("If-Modified-Since"); modSince != "" {
+		modTime, err := http.ParseTime(modSince)
+		if err == nil && cached.modTime.Before(modTime.Add(time.Second)) {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+	}
+	if g.config.EnableGzip && strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+		w.Header().Set("Content-Encoding", "gzip")
+		gz := gzip.NewWriter(w)
+		defer gz.Close()
+		gz.Write(cached.content)
+	} else {
+		w.Write(cached.content)
+	}
 }
 
-// getContentType determines the MIME type based on file extension
 func getContentType(filePath string) string {
-	ext := filepath.Ext(filePath)
+	ext := strings.ToLower(filepath.Ext(filePath))
 	switch ext {
 	case ".html":
-		return "text/html"
+		return "text/html; charset=utf-8"
 	case ".css":
 		return "text/css"
 	case ".js":
 		return "application/javascript"
 	case ".json":
 		return "application/json"
+	case ".png":
+		return "image/png"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".gif":
+		return "image/gif"
+	case ".svg":
+		return "image/svg+xml"
+	case ".webp":
+		return "image/webp"
+	case ".woff":
+		return "font/woff"
+	case ".woff2":
+		return "font/woff2"
+	case ".ttf":
+		return "font/ttf"
+	case ".eot":
+		return "application/vnd.ms-fontobject"
+	case ".otf":
+		return "font/otf"
+	case ".xml":
+		return "application/xml"
+	case ".pdf":
+		return "application/pdf"
+	case ".zip":
+		return "application/zip"
+	case ".txt":
+		return "text/plain; charset=utf-8"
 	default:
 		return "application/octet-stream"
 	}
 }
 
-// serveErrorPage generates standard error pages with server signature
 func (g *GubinNET) serveErrorPage(w http.ResponseWriter, r *http.Request, statusCode int, message string) {
-	w.Header().Del("Server") // Удаляем возможные дубликаты
-	w.Header().Set("Server", "GubinNET/1.1")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(statusCode)
 	html := fmt.Sprintf(`
 <!DOCTYPE html>
@@ -434,23 +813,47 @@ func (g *GubinNET) serveErrorPage(w http.ResponseWriter, r *http.Request, status
     <h1>Error %d</h1>
     <p>%s</p>
     <p>Server: GubinNET/1.1</p>
+    <p>Request ID: %s</p>
 </body>
 </html>
-`, statusCode, statusCode, message)
+`, statusCode, statusCode, message, w.Header().Get("X-Request-ID"))
 	w.Write([]byte(html))
 }
 
-// Main entry point
+var (
+	rateLimiter     = make(map[string]time.Time)
+	rateLimiterLock sync.Mutex
+)
+
 func main() {
 	logger := NewLogger("/etc/gubinnet/logs")
-	logger.Log("Запуск программы...", Info)
-	config := &ConfigParser{logger: logger}
-	err := config.Load("/etc/gubinnet/config.ini")
-	if err != nil {
-		logger.Log(fmt.Sprintf("Ошибка при загрузке конфигурации: %v", err), Error)
-		return
+	if logger == nil {
+		fmt.Println("Failed to initialize logger")
+		os.Exit(1)
 	}
-	server := &GubinNET{config: config, logger: logger}
+	config := &ConfigParser{
+		logger:         logger,
+		MaxRequestSize: 10 << 20, // 10MB default
+		RequestTimeout: 30 * time.Second,
+		EnableMetrics:  true,
+		EnableGzip:     true,
+	}
+	configPath := os.Getenv("GUBINNET_CONFIG")
+	if configPath == "" {
+		configPath = "/etc/gubinnet/config.ini"
+	}
+	err := config.Load(configPath)
+	if err != nil {
+		logger.Log("Failed to load config", Error, map[string]interface{}{
+			"error": err,
+			"path":  configPath,
+		})
+		os.Exit(1)
+	}
+	server := &GubinNET{
+		config: config,
+		logger: logger,
+	}
 	server.Start()
 	select {}
 }
