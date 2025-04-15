@@ -13,7 +13,7 @@ GubinNET is a configurable web server written in Go with support for:
 - Caching
 - Static file serving and SPA fallback
 - Request size limiting
-- Custom error pages**
+- Custom error pages
 - ETag and Last-Modified headers for caching
 - Proxy support
 - Automatic reloading of configuration
@@ -94,9 +94,9 @@ The following metrics are exposed:
 - Automatically manages .NET application lifecycle
 - Handles large file downloads with streaming
 - Supports conditional requests using ETag and Last-Modified headers
-- Serves custom error pages with detailed information**
+- Serves custom error pages with detailed information
 - Automatically detects and prevents malicious URL paths (e.g., `../`)
 - Provides detailed logging for debugging and monitoring
 - Supports both gzip-compressed and uncompressed responses based on client preferences
-- Manages cache entries with thread-safe operations**
+- Manages cache entries with thread-safe operations
 - Includes middleware for panic recovery to prevent server crashes
