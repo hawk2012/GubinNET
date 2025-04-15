@@ -37,11 +37,13 @@ var (
 		Name: "http_requests_total",
 		Help: "Total number of HTTP requests",
 	}, []string{"method", "path", "status"})
+
 	requestDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "http_request_duration_seconds",
 		Help:    "Duration of HTTP requests",
 		Buckets: []float64{0.1, 0.5, 1, 2.5, 5, 10},
 	}, []string{"method", "path"})
+
 	activeConnections = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "http_active_connections",
 		Help: "Number of active HTTP connections",
@@ -70,6 +72,7 @@ func NewLogger(logDirectory string) *Logger {
 func (l *Logger) Log(message string, level LogLevel, fields map[string]interface{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
 	levelStr := levelToString(level)
 	logEntry := map[string]interface{}{
 		"timestamp": time.Now().Format(time.RFC3339),
@@ -79,12 +82,14 @@ func (l *Logger) Log(message string, level LogLevel, fields map[string]interface
 	for k, v := range fields {
 		logEntry[k] = v
 	}
+
 	jsonData, err := json.Marshal(logEntry)
 	if err != nil {
 		fmt.Println("Error marshaling log entry:", err)
 		return
 	}
 	fmt.Println(string(jsonData))
+
 	file, err := os.OpenFile(l.logFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		fmt.Println("Error writing to log:", err)
@@ -156,18 +161,22 @@ func (c *ConfigParser) Load(filePath string) error {
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
 		return fmt.Errorf("config file not found: %s", filePath)
 	}
+
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return err
 	}
 	lines := strings.Split(string(data), "\n")
+
 	c.VirtualHosts = make(map[string]*VirtualHost)
 	var currentHost *VirtualHost
+
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, ";") {
 			continue
 		}
+
 		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
 			section := line[1 : len(line)-1]
 			if strings.HasPrefix(section, "Host:") {
@@ -186,11 +195,13 @@ func (c *ConfigParser) Load(filePath string) error {
 			}
 			continue
 		}
+
 		parts := strings.SplitN(line, "=", 2)
 		if len(parts) != 2 {
 			continue
 		}
 		key, value := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+
 		if currentHost != nil {
 			switch key {
 			case "BasePath":
@@ -279,6 +290,7 @@ func (c *ConfigParser) Load(filePath string) error {
 			}
 		}
 	}
+
 	return nil
 }
 
@@ -320,6 +332,7 @@ func (g *GubinNET) Start() {
 		ReadTimeout:  g.config.RequestTimeout,
 		WriteTimeout: g.config.RequestTimeout,
 	}
+
 	go func() {
 		g.logger.Log("HTTP server started", Info, map[string]interface{}{
 			"port": g.config.ListenHTTP,
@@ -351,6 +364,7 @@ func (g *GubinNET) Start() {
 		},
 		NextProtos: []string{"h2", "http/1.1"},
 	}
+
 	httpsServer := &http.Server{
 		Addr:         fmt.Sprintf(":%d", g.config.ListenHTTPS),
 		TLSConfig:    tlsConfig,
@@ -358,6 +372,7 @@ func (g *GubinNET) Start() {
 		ReadTimeout:  g.config.RequestTimeout,
 		WriteTimeout: g.config.RequestTimeout,
 	}
+
 	go func() {
 		g.logger.Log("HTTPS server started", Info, map[string]interface{}{
 			"port": g.config.ListenHTTPS,
@@ -415,6 +430,7 @@ func (g *GubinNET) Start() {
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+
 	go func() {
 		for {
 			sig := <-sigChan
@@ -483,8 +499,10 @@ func (g *GubinNET) loggingMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			"user_agent": r.UserAgent(),
 		})
 		w.Header().Set("X-Request-ID", requestID)
+
 		ww := &responseWriterWrapper{w: w}
 		next(ww, r)
+
 		g.logger.Log("Request completed", Info, map[string]interface{}{
 			"request_id":  requestID,
 			"method":      r.Method,
@@ -500,8 +518,10 @@ func (g *GubinNET) metricsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		start := time.Now()
 		activeConnections.Inc()
 		defer activeConnections.Dec()
+
 		ww := &responseWriterWrapper{w: w}
 		next(ww, r)
+
 		duration := time.Since(start).Seconds()
 		requestDuration.WithLabelValues(r.Method, r.URL.Path).Observe(duration)
 		requestsTotal.WithLabelValues(r.Method, r.URL.Path, strconv.Itoa(ww.status)).Inc()
@@ -538,28 +558,34 @@ func (g *GubinNET) startDotNetApp(host *VirtualHost) error {
 		"DOTNET_PRINT_TELEMETRY_MESSAGE=false",
 		"ASPNETCORE_SERVER_HEADER=",
 	)
+
 	err := cmd.Start()
 	if err != nil {
 		return err
 	}
+
 	host.AppProcess = cmd.Process
 	g.logger.Log("Started .NET app", Info, map[string]interface{}{
 		"host": host.Domain,
 		"pid":  cmd.Process.Pid,
 	})
+
 	return nil
 }
 
 func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
 	w.Header().Del("Server")
 	w.Header().Set("Server", "GubinNET/1.1")
+
 	if g.config.MaxRequestSize > 0 {
 		r.Body = http.MaxBytesReader(w, r.Body, g.config.MaxRequestSize)
 	}
+
 	if strings.Contains(r.URL.Path, "../") {
 		g.serveErrorPage(w, r, http.StatusBadRequest, "Invalid URL path")
 		return
 	}
+
 	hostHeader := strings.Split(r.Host, ":")[0]
 	host, exists := g.config.VirtualHosts[hostHeader]
 	if !exists {
@@ -573,8 +599,6 @@ func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
 			ip = ip[:proxyIndex]
 		}
 		ip = strings.TrimSpace(strings.Split(ip, ":")[0])
-
-		// Simple rate limiting logic
 		clientKey := ip + ":" + host.Domain
 		rateLimiterLock.Lock()
 		if _, exists := rateLimiter[clientKey]; !exists {
@@ -582,6 +606,7 @@ func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
 		} else {
 			if time.Since(rateLimiter[clientKey]) < time.Second/time.Duration(host.RateLimit) {
 				g.serveErrorPage(w, r, http.StatusTooManyRequests, "Rate limit exceeded")
+				rateLimiterLock.Unlock()
 				return
 			}
 			rateLimiter[clientKey] = time.Now()
@@ -639,14 +664,15 @@ func (g *GubinNET) proxyRequest(w http.ResponseWriter, r *http.Request, proxyUrl
 			ResponseHeaderTimeout: g.config.RequestTimeout / 2,
 		},
 	}
+
 	req, err := http.NewRequest(r.Method, proxyUrl+r.URL.RequestURI(), r.Body)
 	if err != nil {
 		g.serveErrorPage(w, r, http.StatusBadGateway, "Proxy error")
 		r.Body.Close()
 		return
 	}
-	defer req.Body.Close()
 
+	defer req.Body.Close()
 	for key, values := range r.Header {
 		for _, value := range values {
 			req.Header.Add(key, value)
@@ -658,13 +684,14 @@ func (g *GubinNET) proxyRequest(w http.ResponseWriter, r *http.Request, proxyUrl
 		g.serveErrorPage(w, r, http.StatusBadGateway, "Proxy error")
 		return
 	}
-	defer resp.Body.Close()
 
+	defer resp.Body.Close()
 	for key, values := range resp.Header {
 		for _, value := range values {
 			w.Header().Add(key, value)
 		}
 	}
+
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
 }
@@ -674,13 +701,16 @@ func (g *GubinNET) serveFileOrSpa(w http.ResponseWriter, r *http.Request, host *
 	if webRootPath == "" {
 		webRootPath = host.BasePath
 	}
+
 	requestPath := filepath.Clean(strings.TrimLeft(r.URL.Path, "/"))
 	fullPath := filepath.Join(webRootPath, requestPath)
+
 	fileInfo, err := os.Stat(fullPath)
 	if err == nil && !fileInfo.IsDir() {
 		g.serveFile(w, r, fullPath, fileInfo)
 		return
 	}
+
 	if host.SPAFallback != "" {
 		spaPath := filepath.Join(webRootPath, host.SPAFallback)
 		if _, err := os.Stat(spaPath); err == nil {
@@ -688,6 +718,7 @@ func (g *GubinNET) serveFileOrSpa(w http.ResponseWriter, r *http.Request, host *
 			return
 		}
 	}
+
 	g.serveErrorPage(w, r, http.StatusNotFound, "File Not Found")
 }
 
@@ -695,6 +726,7 @@ func (g *GubinNET) serveFile(w http.ResponseWriter, r *http.Request, filePath st
 	g.mu.Lock()
 	cached, found := g.cache[filePath]
 	g.mu.Unlock()
+
 	if !found || (fileInfo != nil && fileInfo.ModTime().After(cached.modTime)) {
 		if fileInfo == nil {
 			var err error
@@ -704,34 +736,41 @@ func (g *GubinNET) serveFile(w http.ResponseWriter, r *http.Request, filePath st
 				return
 			}
 		}
+
 		if fileInfo.Size() > g.config.MaxRequestSize {
 			g.serveErrorPage(w, r, http.StatusRequestEntityTooLarge, "File too large")
 			return
 		}
+
 		content, err := os.ReadFile(filePath)
 		if err != nil {
 			g.serveErrorPage(w, r, http.StatusInternalServerError, "Internal Server Error")
 			return
 		}
+
 		cached = &cacheEntry{
 			content:     content,
 			modTime:     fileInfo.ModTime(),
 			size:        fileInfo.Size(),
 			contentType: getContentType(filePath),
 		}
+
 		g.mu.Lock()
 		g.cache[filePath] = cached
 		g.mu.Unlock()
 	}
+
 	w.Header().Set("Content-Type", cached.contentType)
 	w.Header().Set("Content-Length", strconv.FormatInt(cached.size, 10))
 	w.Header().Set("Last-Modified", cached.modTime.Format(http.TimeFormat))
 	etag := fmt.Sprintf(`"%x-%x"`, cached.modTime.Unix(), cached.size)
 	w.Header().Set("ETag", etag)
+
 	if match := r.Header.Get("If-None-Match"); match == etag {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
+
 	if modSince := r.Header.Get("If-Modified-Since"); modSince != "" {
 		modTime, err := http.ParseTime(modSince)
 		if err == nil && cached.modTime.Before(modTime.Add(time.Second)) {
@@ -739,6 +778,7 @@ func (g *GubinNET) serveFile(w http.ResponseWriter, r *http.Request, filePath st
 			return
 		}
 	}
+
 	if g.config.EnableGzip && strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
 		w.Header().Set("Content-Encoding", "gzip")
 		gz := gzip.NewWriter(w)
@@ -831,6 +871,7 @@ func main() {
 		fmt.Println("Failed to initialize logger")
 		os.Exit(1)
 	}
+
 	config := &ConfigParser{
 		logger:         logger,
 		MaxRequestSize: 10 << 20, // 10MB default
@@ -838,10 +879,12 @@ func main() {
 		EnableMetrics:  true,
 		EnableGzip:     true,
 	}
+
 	configPath := os.Getenv("GUBINNET_CONFIG")
 	if configPath == "" {
 		configPath = "/etc/gubinnet/config.ini"
 	}
+
 	err := config.Load(configPath)
 	if err != nil {
 		logger.Log("Failed to load config", Error, map[string]interface{}{
@@ -850,10 +893,12 @@ func main() {
 		})
 		os.Exit(1)
 	}
+
 	server := &GubinNET{
 		config: config,
 		logger: logger,
 	}
+
 	server.Start()
 	select {}
 }
