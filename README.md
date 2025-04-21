@@ -1,102 +1,117 @@
 # GubinNET Web Server
 
-GubinNET is a configurable web server written in Go with support for:
-- HTTP/HTTPS serving
-- Virtual hosting
-- .NET application hosting
-- PHP support
-- Metrics monitoring (Prometheus)
-- Rate limiting
-- Basic authentication
-- CORS
-- Gzip compression
-- Caching
-- Static file serving and SPA fallback
-- Request size limiting
-- Custom error pages
-- ETag and Last-Modified headers for caching
-- Proxy support
-- Automatic reloading of configuration
-- Built-in health checks
+GubinNET — это мощный и гибкий веб-сервер, разработанный для простого развертывания и обслуживания веб-приложений на различных языках программирования. Сервер поддерживает множество современных технологий и предоставляет широкие возможности для настройки.
 
-## Features
+## Возможности
 
-- Configurable via INI file
-- Supports multiple virtual hosts with individual settings
-- Automatic .NET application startup/shutdown
-- Built-in metrics endpoint on port 9090
-- Health check endpoint on port 8081
-- Graceful shutdown and configuration reload
-- Middleware for logging, metrics collection, and panic recovery
-- Supports static file serving with MIME type detection
-- Handles malicious path traversal attempts
-- Rate limiting based on client IP
-- CORS headers customization
-- SPA fallback for single-page applications
-- Customizable timeouts for requests
-- Supports trusted proxies for correct client IP detection
-- Automatic cleanup and management of cached files
-- Custom headers like `Server` and `X-Request-ID`
+- **Поддержка HTTP/HTTPS**: Обслуживание запросов по протоколам HTTP и HTTPS.
+- **Виртуальные хосты**: Поддержка нескольких доменов с индивидуальными настройками для каждого.
+- **Хостинг .NET приложений**: Автоматический запуск и управление жизненным циклом приложений на платформе .NET.
+- **Поддержка Node.js**: Встроенная поддержка Node.js приложений.
+- **PHP поддержка**: Интеграция с PHP интерпретатором для обработки скриптов.
+- **Мониторинг метрик (Prometheus)**: Встроенный эндпоинт для сбора метрик в формате Prometheus.
+- **Ограничение скорости (Rate Limiting)**: Защита от злоупотреблений через ограничение количества запросов от одного клиента.
+- **Базовая аутентификация**: Защита доступа к ресурсам с использованием Basic Auth.
+- **CORS**: Настройка заголовков Cross-Origin Resource Sharing для безопасного взаимодействия между доменами.
+- **Сжатие Gzip**: Сжатие ответов для уменьшения объема передаваемых данных.
+- **Кэширование**: Кэширование статических файлов для улучшения производительности.
+- **Обслуживание статических файлов и SPA**: Поддержка одностраничных приложений (SPA) с fallback механизмом.
+- **Ограничение размера запроса**: Защита от перегрузки сервера большими запросами.
+- **Пользовательские страницы ошибок**: Информативные страницы ошибок с детальным описанием проблемы.
+- **ETag и Last-Modified заголовки**: Поддержка условных запросов для оптимизации кэширования.
+- **Проксирование запросов**: Проксирование запросов на другие серверы или внутренние приложения.
+- **Автоматическая перезагрузка конфигурации**: Возможность перечитать конфигурацию без перезапуска сервера.
+- **Встроенные проверки работоспособности**: Эндпоинт для мониторинга состояния сервера.
 
-## Configuration
+---
 
-The server reads configuration from an INI file (default: `/etc/gubinnet/config.ini`).
-Main configuration options include:
-- Listen ports for HTTP/HTTPS
-- Max request size
-- Request timeout
-- Metrics and Gzip support flags
-- Trusted proxies list
-- Default proxy settings for upstream servers
-- PHP binary path and web root configuration
+## Поддерживаемые языки и технологии
 
-Virtual host configuration includes:
-- Base path and web root
-- SSL certificates
-- Proxy settings
-- Basic auth credentials
-- CORS settings
-- Rate limiting
-- Application mode (e.g., dotnet)
-- Path to DLL for .NET applications
-- Internal port for hosted applications
-- SPA fallback file for frontend routing
+- **.NET**: Сервер автоматически запускает и управляет приложениями на платформе .NET. Просто укажите путь к DLL файлу вашего приложения, и сервер сделает все остальное.
+- **Node.js**: Встроенная поддержка Node.js позволяет легко развернуть JavaScript приложения на стороне сервера.
+- **PHP**: Интеграция с PHP интерпретатором для выполнения скриптов.
+- **Статические файлы**: Поддержка обслуживания HTML, CSS, JavaScript, изображений и других статических ресурсов.
+- **SPA (Single Page Applications)**: Фолбэк для одностраничных приложений, таких как React, Angular или Vue.js.
 
-## Usage
+---
 
-1. Build the server using `go build`
-2. Set configuration file path using `GUBINNET_CONFIG` environment variable if needed
-3. Run the executable
-4. Access metrics at http://localhost:9090/metrics
-5. Check health status at http://localhost:8081/health
-6. Reload configuration by sending SIGHUP signal
-7. Gracefully shut down using SIGTERM or SIGINT
+## Использование
 
-## Logging
+### Запуск сервера
 
-Logs are stored in JSON format in the specified log directory (`/etc/gubinnet/logs` by default). Each log entry includes:
-- Timestamp
-- Log level (INFO, WARNING, ERROR, DEBUG)
-- Message
-- Additional contextual fields (e.g., host, request ID, error details)
+1. Убедитесь, что сервер установлен и настроен.
+2. Запустите сервер командой:
 
-## Metrics
+   ```bash
+   gubinnet start
+   ```
 
-The following metrics are exposed:
-- `http_requests_total` (counter): Tracks total HTTP requests by method, path, and status code
-- `http_request_duration_seconds` (histogram): Measures request duration in seconds with configurable buckets
-- `http_active_connections` (gauge): Tracks the number of active HTTP connections
+3. Доступ к метрикам можно получить по адресу: http://localhost:9090/metrics.
+4. Проверка работоспособности доступна по адресу: http://localhost:8081/health.
 
-## Notes
+### Перезагрузка конфигурации
 
-- Supports graceful shutdown on SIGTERM/SIGINT
-- Reloads configuration on SIGHUP
-- Automatically manages .NET application lifecycle
-- Handles large file downloads with streaming
-- Supports conditional requests using ETag and Last-Modified headers
-- Serves custom error pages with detailed information
-- Automatically detects and prevents malicious URL paths (e.g., `../`)
-- Provides detailed logging for debugging and monitoring
-- Supports both gzip-compressed and uncompressed responses based on client preferences
-- Manages cache entries with thread-safe operations
-- Includes middleware for panic recovery to prevent server crashes
+Для перезагрузки конфигурации без остановки сервера отправьте сигнал SIGHUP:
+
+```bash
+kill -SIGHUP <PID>
+```
+
+### Остановка сервера
+
+Для корректной остановки сервера используйте сигнал SIGTERM или SIGINT:
+
+```bash
+kill -SIGTERM <PID>
+```
+
+---
+
+## Конфигурация
+
+Конфигурация выполняется через INI файл (по умолчанию: `/etc/gubinnet/config.ini`). Основные параметры включают:
+
+- Порты для прослушивания HTTP/HTTPS.
+- Максимальный размер запроса.
+- Таймауты для запросов.
+- Настройки прокси для upstream серверов.
+- Путь к PHP бинарнику и корневой директории для PHP.
+- Параметры для .NET и Node.js приложений.
+
+Пример конфигурации:
+```ini
+[Host:example.com]
+BasePath=/var/www/example
+WebRootPath=/var/www/example/public
+AppMode=dotnet
+DllPath=/var/www/example/app.dll
+InternalPort=5000
+SSLCertificate=/etc/ssl/example.crt
+SSLKey=/etc/ssl/example.key
+
+[PHP]
+Enabled=true
+BinaryPath=/usr/bin/php
+WebRootPath=/var/www/php
+
+[NodeJS]
+Enabled=true
+ScriptPath=/var/www/node/app.js
+InternalPort=3000
+```
+
+---
+
+## Логирование
+
+Логи сохраняются в формате JSON в указанной директории (по умолчанию: `/etc/gubinnet/logs`). Каждая запись содержит подробную информацию о событиях, включая временные метки, уровень логирования и контекстные данные.
+
+---
+
+## Примечания
+
+- Сервер автоматически управляет жизненным циклом .NET и Node.js приложений.
+- Поддерживает обработку больших файлов с использованием потоковой передачи.
+- Предотвращает вредоносные URL пути (например, `../`).
+- Предоставляет подробное логирование для отладки и мониторинга.
+- Поддерживает как сжатые (gzip), так и несжатые ответы в зависимости от предпочтений клиента.
