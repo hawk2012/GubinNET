@@ -116,6 +116,7 @@ type ConfigParser struct {
 	ConfigPath     string
 	VirtualHosts   map[string]*VirtualHost
 	PHPConfig      *PHPSettings
+	NodeConfig     *NodeSettings
 	MaxRequestSize int64
 	RequestTimeout time.Duration
 	EnableMetrics  bool
@@ -139,6 +140,7 @@ type VirtualHost struct {
 	BasicAuth      map[string]string
 	CORS           CORSSettings
 	RateLimit      int
+	RewriteRules   map[string]string
 }
 
 type CORSSettings struct {
@@ -151,6 +153,12 @@ type PHPSettings struct {
 	Enabled     bool
 	BinaryPath  string
 	WebRootPath string
+}
+
+type NodeSettings struct {
+	Enabled      bool
+	ScriptPath   string
+	InternalPort int
 }
 
 func (c *ConfigParser) Load(filePath string) error {
@@ -179,11 +187,14 @@ func (c *ConfigParser) Load(filePath string) error {
 					CORS: CORSSettings{
 						AllowedMethods: []string{"GET", "POST", "HEAD"},
 					},
+					RewriteRules: make(map[string]string),
 				}
 				c.VirtualHosts[hostName] = currentHost
 				c.logger.Log("Loaded host", Info, map[string]interface{}{"host": hostName})
 			} else if section == "PHP" {
 				c.PHPConfig = &PHPSettings{}
+			} else if section == "NodeJS" {
+				c.NodeConfig = &NodeSettings{}
 			}
 			continue
 		}
@@ -233,6 +244,11 @@ func (c *ConfigParser) Load(filePath string) error {
 					continue
 				}
 				currentHost.RateLimit = rateLimit
+			case "RewriteRule":
+				parts := strings.SplitN(value, " ", 2)
+				if len(parts) == 2 {
+					currentHost.RewriteRules[parts[0]] = parts[1]
+				}
 			}
 		} else if c.PHPConfig != nil {
 			switch key {
@@ -247,6 +263,25 @@ func (c *ConfigParser) Load(filePath string) error {
 				c.PHPConfig.BinaryPath = absBinPath
 			case "WebRootPath":
 				c.PHPConfig.WebRootPath = value
+			}
+		} else if c.NodeConfig != nil {
+			switch key {
+			case "Enabled":
+				c.NodeConfig.Enabled, _ = strconv.ParseBool(value)
+			case "ScriptPath":
+				absScriptPath, err := filepath.Abs(value)
+				if err != nil {
+					c.logger.Log("Invalid NodeJS ScriptPath", Error, map[string]interface{}{"path": value, "error": err})
+					continue
+				}
+				c.NodeConfig.ScriptPath = absScriptPath
+			case "InternalPort":
+				port, err := strconv.Atoi(value)
+				if err != nil || port <= 0 || port > 65535 {
+					c.logger.Log("Invalid NodeJS InternalPort", Error, map[string]interface{}{"value": value, "error": err})
+					continue
+				}
+				c.NodeConfig.InternalPort = port
 			}
 		} else {
 			switch key {
@@ -301,21 +336,28 @@ type cacheEntry struct {
 func (g *GubinNET) Start() {
 	g.logger.Log("Starting server", Info, nil)
 	g.cache = make(map[string]*cacheEntry)
-
-	// Инициализация cookie jar
 	jar, err := cookiejar.New(nil)
 	if err != nil {
 		g.logger.Log("Failed to initialize cookie jar", Error, map[string]interface{}{"error": err})
 	} else {
 		g.cookieJar = jar
 	}
-
 	for _, host := range g.config.VirtualHosts {
 		if host.AppMode == "dotnet" && host.DllPath != "" && host.InternalPort != 0 {
 			go func(h *VirtualHost) {
 				err := g.startDotNetApp(h)
 				if err != nil {
 					g.logger.Log("Failed to start .NET app", Error, map[string]interface{}{
+						"host":  h.Domain,
+						"error": err,
+					})
+				}
+			}(host)
+		} else if host.AppMode == "nodejs" && g.config.NodeConfig.Enabled && g.config.NodeConfig.ScriptPath != "" && g.config.NodeConfig.InternalPort != 0 {
+			go func(h *VirtualHost) {
+				err := g.startNodeApp(h)
+				if err != nil {
+					g.logger.Log("Failed to start Node.js app", Error, map[string]interface{}{
 						"host":  h.Domain,
 						"error": err,
 					})
@@ -443,7 +485,7 @@ func (g *GubinNET) Start() {
 				healthServer.Shutdown(ctx)
 				for _, host := range g.config.VirtualHosts {
 					if host.AppProcess != nil {
-						g.logger.Log("Stopping .NET app", Info, map[string]interface{}{
+						g.logger.Log("Stopping app", Info, map[string]interface{}{
 							"host": host.Domain,
 							"pid":  host.AppProcess.Pid,
 						})
@@ -554,6 +596,25 @@ func (g *GubinNET) startDotNetApp(host *VirtualHost) error {
 	return nil
 }
 
+func (g *GubinNET) startNodeApp(host *VirtualHost) error {
+	cmd := exec.Command("node", g.config.NodeConfig.ScriptPath)
+	cmd.Dir = filepath.Dir(g.config.NodeConfig.ScriptPath)
+	cmd.Env = append(os.Environ(),
+		fmt.Sprintf("PORT=%d", g.config.NodeConfig.InternalPort),
+		"NODE_ENV=production",
+	)
+	err := cmd.Start()
+	if err != nil {
+		return err
+	}
+	host.AppProcess = cmd.Process
+	g.logger.Log("Started Node.js app", Info, map[string]interface{}{
+		"host": host.Domain,
+		"pid":  cmd.Process.Pid,
+	})
+	return nil
+}
+
 func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
 	w.Header().Del("Server")
 	w.Header().Set("Server", "GubinNET/1.1")
@@ -617,12 +678,20 @@ func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if host.DefaultProxy != "" || (host.AppMode == "dotnet" && host.InternalPort != 0) {
+	for pattern, target := range host.RewriteRules {
+		if matched, _ := filepath.Match(pattern, r.URL.Path); matched {
+			r.URL.Path = target
+			break
+		}
+	}
+	if host.DefaultProxy != "" || (host.AppMode == "dotnet" && host.InternalPort != 0) || (host.AppMode == "nodejs" && g.config.NodeConfig.Enabled && g.config.NodeConfig.InternalPort != 0) {
 		var proxyUrl string
 		if host.DefaultProxy != "" {
 			proxyUrl = host.DefaultProxy
-		} else {
+		} else if host.AppMode == "dotnet" {
 			proxyUrl = fmt.Sprintf("http://127.0.0.1:%d", host.InternalPort)
+		} else if host.AppMode == "nodejs" {
+			proxyUrl = fmt.Sprintf("http://127.0.0.1:%d", g.config.NodeConfig.InternalPort)
 		}
 		g.proxyRequest(w, r, proxyUrl)
 		return
@@ -645,26 +714,19 @@ func (g *GubinNET) proxyRequest(w http.ResponseWriter, r *http.Request, proxyUrl
 		return
 	}
 	defer req.Body.Close()
-
-	// Передача всех заголовков
 	for key, values := range r.Header {
 		for _, value := range values {
 			req.Header.Add(key, value)
 		}
 	}
-
-	// Добавляем реальный IP адрес
 	req.Header.Set("X-Real-IP", getRealIP(r))
 	req.Header.Set("X-Forwarded-For", getRealIP(r))
-
 	resp, err := client.Do(req)
 	if err != nil {
 		g.serveErrorPage(w, r, http.StatusBadGateway, "Proxy error")
 		return
 	}
 	defer resp.Body.Close()
-
-	// Специальная обработка Set-Cookie
 	for key, values := range resp.Header {
 		if key == "Set-Cookie" {
 			w.Header()["Set-Cookie"] = values
@@ -674,7 +736,6 @@ func (g *GubinNET) proxyRequest(w http.ResponseWriter, r *http.Request, proxyUrl
 			}
 		}
 	}
-
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
 }
