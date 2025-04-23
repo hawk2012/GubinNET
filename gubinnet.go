@@ -943,6 +943,11 @@ func getRealIP(r *http.Request) string {
 	return ip
 }
 
+func initPlugins() {
+	plugins.RegisterWSSPlugin()
+	plugins.RegisterExamplePlugin()
+}
+
 // Точка входа
 func main() {
 	logger := NewLogger("/etc/gubinnet/logs")
@@ -973,6 +978,7 @@ func main() {
 		config: config,
 		logger: logger,
 	}
+	initPlugins()
 	server.Start()
 	select {}
 }
