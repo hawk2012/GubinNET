@@ -19,6 +19,8 @@ import (
 	"syscall"
 	"time"
 
+	"GubinNET/plugins" // Абсолютный путь
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -634,16 +636,16 @@ type Plugin interface {
 	Execute(w http.ResponseWriter, r *http.Request) bool
 }
 
-var plugins []Plugin
+var registeredPlugins []Plugin
 
 // Экспортируемая функция для регистрации плагинов
 func RegisterPlugin(p Plugin) {
-	plugins = append(plugins, p)
+	registeredPlugins = append(registeredPlugins, p)
 }
 
 // Обработка запросов
 func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
-	for _, plugin := range plugins {
+	for _, plugin := range registeredPlugins {
 		if plugin.Execute(w, r) {
 			return // Если плагин обработал запрос, завершаем выполнение
 		}
@@ -943,11 +945,6 @@ func getRealIP(r *http.Request) string {
 	return ip
 }
 
-func initPlugins() {
-	plugins.RegisterWSSPlugin()
-	plugins.RegisterExamplePlugin()
-}
-
 // Точка входа
 func main() {
 	logger := NewLogger("/etc/gubinnet/logs")
@@ -974,11 +971,13 @@ func main() {
 		})
 		os.Exit(1)
 	}
+
 	server := &GubinNET{
 		config: config,
 		logger: logger,
 	}
-	initPlugins()
+
+	plugins.RegisterWSSPlugin()
 	server.Start()
 	select {}
 }

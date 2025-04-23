@@ -1,4 +1,4 @@
-module mikhail.gubin.systems/m/v2
+module GubinNET
 
 go 1.23.1
 
