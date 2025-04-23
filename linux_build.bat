@@ -6,7 +6,7 @@ set GOARCH=amd64
 :: Переходим в директорию с исходным кодом (если нужно)
 
 :: Команда сборки Go-приложения
-go build -o gubinnet -ldflags="-s -w" -gcflags="all=-N -l" -trimpath
+go build -o gubinnet.go plugins/*.go -ldflags="-s -w" -gcflags="all=-N -l" -trimpath
 
 :: Очищаем переменные окружения после завершения
 set GOOS=

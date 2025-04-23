@@ -40,13 +40,11 @@ var (
 		Name: "http_requests_total",
 		Help: "Total number of HTTP requests",
 	}, []string{"method", "path", "status"})
-
 	requestDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "http_request_duration_seconds",
 		Help:    "Duration of HTTP requests",
 		Buckets: []float64{0.1, 0.5, 1, 2.5, 5, 10},
 	}, []string{"method", "path"})
-
 	activeConnections = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "http_active_connections",
 		Help: "Number of active HTTP connections",
@@ -76,7 +74,6 @@ func NewLogger(logDirectory string) *Logger {
 func (l *Logger) Log(message string, level LogLevel, fields map[string]interface{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-
 	levelStr := levelToString(level)
 	logEntry := map[string]interface{}{
 		"timestamp": time.Now().Format(time.RFC3339),
@@ -86,13 +83,11 @@ func (l *Logger) Log(message string, level LogLevel, fields map[string]interface
 	for k, v := range fields {
 		logEntry[k] = v
 	}
-
 	jsonData, err := json.Marshal(logEntry)
 	if err != nil {
 		fmt.Println("Error marshaling log entry:", err)
 		return
 	}
-
 	fmt.Println(string(jsonData))
 	file, err := os.OpenFile(l.logFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
@@ -175,22 +170,18 @@ func (c *ConfigParser) Load(filePath string) error {
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
 		return fmt.Errorf("config file not found: %s", filePath)
 	}
-
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return err
 	}
-
 	lines := strings.Split(string(data), "\n")
 	c.VirtualHosts = make(map[string]*VirtualHost)
 	var currentHost *VirtualHost
-
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, ";") {
 			continue
 		}
-
 		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
 			section := line[1 : len(line)-1]
 			if strings.HasPrefix(section, "Host:") {
@@ -212,13 +203,11 @@ func (c *ConfigParser) Load(filePath string) error {
 			}
 			continue
 		}
-
 		parts := strings.SplitN(line, "=", 2)
 		if len(parts) != 2 {
 			continue
 		}
 		key, value := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
-
 		if currentHost != nil {
 			switch key {
 			case "BasePath":
@@ -354,14 +343,12 @@ type cacheEntry struct {
 func (g *GubinNET) Start() {
 	g.logger.Log("Starting server", Info, nil)
 	g.cache = make(map[string]*cacheEntry)
-
 	jar, err := cookiejar.New(nil)
 	if err != nil {
 		g.logger.Log("Failed to initialize cookie jar", Error, map[string]interface{}{"error": err})
 	} else {
 		g.cookieJar = jar
 	}
-
 	for _, host := range g.config.VirtualHosts {
 		if host.AppMode == "dotnet" && host.DllPath != "" && host.InternalPort != 0 {
 			go func(h *VirtualHost) {
@@ -385,14 +372,12 @@ func (g *GubinNET) Start() {
 			}(host)
 		}
 	}
-
 	httpServer := &http.Server{
 		Addr:         fmt.Sprintf(":%d", g.config.ListenHTTP),
 		Handler:      g.recoveryMiddleware(g.loggingMiddleware(g.metricsMiddleware(g.handleRequest))),
 		ReadTimeout:  g.config.RequestTimeout,
 		WriteTimeout: g.config.RequestTimeout,
 	}
-
 	go func() {
 		g.logger.Log("HTTP server started", Info, map[string]interface{}{
 			"port": g.config.ListenHTTP,
@@ -404,7 +389,6 @@ func (g *GubinNET) Start() {
 			})
 		}
 	}()
-
 	tlsConfig := &tls.Config{
 		MinVersion: tls.VersionTLS12,
 		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
@@ -424,7 +408,6 @@ func (g *GubinNET) Start() {
 		},
 		NextProtos: []string{"h2", "http/1.1"},
 	}
-
 	httpsServer := &http.Server{
 		Addr:         fmt.Sprintf(":%d", g.config.ListenHTTPS),
 		TLSConfig:    tlsConfig,
@@ -432,7 +415,6 @@ func (g *GubinNET) Start() {
 		ReadTimeout:  g.config.RequestTimeout,
 		WriteTimeout: g.config.RequestTimeout,
 	}
-
 	go func() {
 		g.logger.Log("HTTPS server started", Info, map[string]interface{}{
 			"port": g.config.ListenHTTPS,
@@ -444,7 +426,6 @@ func (g *GubinNET) Start() {
 			})
 		}
 	}()
-
 	var metricsServer *http.Server
 	if g.config.EnableMetrics {
 		go func() {
@@ -465,7 +446,6 @@ func (g *GubinNET) Start() {
 			}
 		}()
 	}
-
 	var healthServer *http.Server
 	go func() {
 		healthMux := http.NewServeMux()
@@ -487,10 +467,8 @@ func (g *GubinNET) Start() {
 			})
 		}
 	}()
-
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
-
 	go func() {
 		for sig := range sigChan {
 			switch sig {
@@ -650,27 +628,42 @@ func (g *GubinNET) startNodeApp(host *VirtualHost) error {
 	return nil
 }
 
+// Интерфейс для плагинов
+type Plugin interface {
+	Name() string
+	Execute(w http.ResponseWriter, r *http.Request) bool
+}
+
+var plugins []Plugin
+
+// Экспортируемая функция для регистрации плагинов
+func RegisterPlugin(p Plugin) {
+	plugins = append(plugins, p)
+}
+
 // Обработка запросов
 func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
+	for _, plugin := range plugins {
+		if plugin.Execute(w, r) {
+			return // Если плагин обработал запрос, завершаем выполнение
+		}
+	}
+
 	w.Header().Del("Server")
 	w.Header().Set("Server", "GubinNET/1.2")
-
 	if g.config.MaxRequestSize > 0 {
 		r.Body = http.MaxBytesReader(w, r.Body, g.config.MaxRequestSize)
 	}
-
 	if strings.Contains(r.URL.Path, "../") {
 		g.serveErrorPage(w, r, http.StatusBadRequest, "Invalid URL path")
 		return
 	}
-
 	hostHeader := strings.Split(r.Host, ":")[0]
 	host, exists := g.config.VirtualHosts[hostHeader]
 	if !exists {
 		g.serveErrorPage(w, r, http.StatusNotFound, "Host not found")
 		return
 	}
-
 	if host.RateLimit > 0 {
 		ip := r.RemoteAddr
 		if proxyIndex := strings.Index(ip, ","); proxyIndex != -1 {
@@ -691,7 +684,6 @@ func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
 		}
 		rateLimiterLock.Unlock()
 	}
-
 	if len(host.BasicAuth) > 0 {
 		username, password, ok := r.BasicAuth()
 		if !ok || host.BasicAuth[username] != password {
@@ -700,7 +692,6 @@ func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-
 	if len(host.CORS.AllowedOrigins) > 0 {
 		origin := r.Header.Get("Origin")
 		if origin != "" {
@@ -720,14 +711,12 @@ func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-
 	for pattern, target := range host.RewriteRules {
 		if matched, _ := filepath.Match(pattern, r.URL.Path); matched {
 			r.URL.Path = target
 			break
 		}
 	}
-
 	if host.DefaultProxy != "" || (host.AppMode == "dotnet" && host.InternalPort != 0) || (host.AppMode == "nodejs" && g.config.NodeConfig.Enabled && g.config.NodeConfig.InternalPort != 0) {
 		var proxyUrl string
 		if host.DefaultProxy != "" {
@@ -740,7 +729,6 @@ func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
 		g.proxyRequest(w, r, proxyUrl)
 		return
 	}
-
 	g.serveFileOrSpa(w, r, host)
 }
 
@@ -760,23 +748,19 @@ func (g *GubinNET) proxyRequest(w http.ResponseWriter, r *http.Request, proxyUrl
 		return
 	}
 	defer req.Body.Close()
-
 	for key, values := range r.Header {
 		for _, value := range values {
 			req.Header.Add(key, value)
 		}
 	}
-
 	req.Header.Set("X-Real-IP", getRealIP(r))
 	req.Header.Set("X-Forwarded-For", getRealIP(r))
-
 	resp, err := client.Do(req)
 	if err != nil {
 		g.serveErrorPage(w, r, http.StatusBadGateway, "Proxy error")
 		return
 	}
 	defer resp.Body.Close()
-
 	for key, values := range resp.Header {
 		if key == "Set-Cookie" {
 			w.Header()["Set-Cookie"] = values
@@ -786,7 +770,6 @@ func (g *GubinNET) proxyRequest(w http.ResponseWriter, r *http.Request, proxyUrl
 			}
 		}
 	}
-
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
 }
@@ -797,16 +780,13 @@ func (g *GubinNET) serveFileOrSpa(w http.ResponseWriter, r *http.Request, host *
 	if webRootPath == "" {
 		webRootPath = host.BasePath
 	}
-
 	requestPath := filepath.Clean(strings.TrimLeft(r.URL.Path, "/"))
 	fullPath := filepath.Join(webRootPath, requestPath)
-
 	fileInfo, err := os.Stat(fullPath)
 	if err == nil && !fileInfo.IsDir() {
 		g.serveFile(w, r, fullPath, fileInfo)
 		return
 	}
-
 	if host.SPAFallback != "" {
 		spaPath := filepath.Join(webRootPath, host.SPAFallback)
 		if _, err := os.Stat(spaPath); err == nil {
@@ -814,7 +794,6 @@ func (g *GubinNET) serveFileOrSpa(w http.ResponseWriter, r *http.Request, host *
 			return
 		}
 	}
-
 	g.serveErrorPage(w, r, http.StatusNotFound, "File Not Found")
 }
 
@@ -823,7 +802,6 @@ func (g *GubinNET) serveFile(w http.ResponseWriter, r *http.Request, filePath st
 	g.mu.Lock()
 	cached, found := g.cache[filePath]
 	g.mu.Unlock()
-
 	if !found || (fileInfo != nil && fileInfo.ModTime().After(cached.modTime)) {
 		if fileInfo == nil {
 			var err error
@@ -833,42 +811,34 @@ func (g *GubinNET) serveFile(w http.ResponseWriter, r *http.Request, filePath st
 				return
 			}
 		}
-
 		if fileInfo.Size() > g.config.MaxRequestSize {
 			g.serveErrorPage(w, r, http.StatusRequestEntityTooLarge, "File too large")
 			return
 		}
-
 		content, err := os.ReadFile(filePath)
 		if err != nil {
 			g.serveErrorPage(w, r, http.StatusInternalServerError, "Internal Server Error")
 			return
 		}
-
 		cached = &cacheEntry{
 			content:     content,
 			modTime:     fileInfo.ModTime(),
 			size:        fileInfo.Size(),
 			contentType: getContentType(filePath),
 		}
-
 		g.mu.Lock()
 		g.cache[filePath] = cached
 		g.mu.Unlock()
 	}
-
 	w.Header().Set("Content-Type", cached.contentType)
 	w.Header().Set("Content-Length", strconv.FormatInt(cached.size, 10))
 	w.Header().Set("Last-Modified", cached.modTime.Format(http.TimeFormat))
-
 	etag := fmt.Sprintf(`"%x-%x"`, cached.modTime.Unix(), cached.size)
 	w.Header().Set("ETag", etag)
-
 	if match := r.Header.Get("If-None-Match"); match == etag {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
-
 	if modSince := r.Header.Get("If-Modified-Since"); modSince != "" {
 		modTime, err := http.ParseTime(modSince)
 		if err == nil && cached.modTime.Before(modTime.Add(time.Second)) {
@@ -876,7 +846,6 @@ func (g *GubinNET) serveFile(w http.ResponseWriter, r *http.Request, filePath st
 			return
 		}
 	}
-
 	if g.config.EnableGzip && strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
 		w.Header().Set("Content-Encoding", "gzip")
 		gz := gzip.NewWriter(w)
@@ -936,7 +905,6 @@ func getContentType(filePath string) string {
 func (g *GubinNET) serveErrorPage(w http.ResponseWriter, r *http.Request, statusCode int, message string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(statusCode)
-
 	html := fmt.Sprintf(`
 <!DOCTYPE html>
 <html lang="en">
@@ -958,7 +926,6 @@ func (g *GubinNET) serveErrorPage(w http.ResponseWriter, r *http.Request, status
 </body>
 </html>
 `, statusCode, statusCode, message, w.Header().Get("X-Request-ID"))
-
 	w.Write([]byte(html))
 }
 
@@ -983,7 +950,6 @@ func main() {
 		fmt.Println("Failed to initialize logger")
 		os.Exit(1)
 	}
-
 	config := &ConfigParser{
 		logger:         logger,
 		MaxRequestSize: 10 << 20, // 10MB default
@@ -991,12 +957,10 @@ func main() {
 		EnableMetrics:  true,
 		EnableGzip:     true,
 	}
-
 	configPath := os.Getenv("GUBINNET_CONFIG")
 	if configPath == "" {
 		configPath = "/etc/gubinnet/config.ini"
 	}
-
 	err := config.Load(configPath)
 	if err != nil {
 		logger.Log("Failed to load config", Error, map[string]interface{}{
@@ -1005,12 +969,10 @@ func main() {
 		})
 		os.Exit(1)
 	}
-
 	server := &GubinNET{
 		config: config,
 		logger: logger,
 	}
-
 	server.Start()
 	select {}
 }
