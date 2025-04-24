@@ -1,6 +1,7 @@
 package main
 
 import (
+	"GubinNET/pluginregistry"
 	"compress/gzip"
 	"context"
 	"crypto/tls"
@@ -18,8 +19,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-
-	"GubinNET/plugins" // Абсолютный путь
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -945,7 +944,6 @@ func getRealIP(r *http.Request) string {
 	return ip
 }
 
-// Точка входа
 func main() {
 	logger := NewLogger("/etc/gubinnet/logs")
 	if logger == nil {
@@ -972,12 +970,19 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Автоматическая загрузка плагинов
+	pluginDir := ".\\plugins" // Укажите правильный путь к плагинам
+	err = pluginregistry.LoadPlugins(pluginDir)
+	if err != nil {
+		logger.Log("Failed to load plugins", Error, map[string]interface{}{
+			"error": err,
+		})
+	}
+
 	server := &GubinNET{
 		config: config,
 		logger: logger,
 	}
-
-	plugins.RegisterWSSPlugin()
 	server.Start()
 	select {}
 }
