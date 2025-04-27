@@ -1,13 +1,14 @@
 package main
 
 import (
-	"GubinNET/pluginregistry"
+	"GubinNET/antiddos"
+	"GubinNET/logger"
 	"compress/gzip"
 	"context"
 	"crypto/tls"
-	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/cookiejar"
 	"os"
@@ -20,19 +21,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-)
-
-// Определение уровня логирования
-type LogLevel int
-
-const (
-	Info LogLevel = iota
-	Warning
-	Error
-	Debug
 )
 
 // Метрики Prometheus
@@ -41,78 +33,18 @@ var (
 		Name: "http_requests_total",
 		Help: "Total number of HTTP requests",
 	}, []string{"method", "path", "status"})
+
 	requestDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "http_request_duration_seconds",
 		Help:    "Duration of HTTP requests",
 		Buckets: []float64{0.1, 0.5, 1, 2.5, 5, 10},
 	}, []string{"method", "path"})
+
 	activeConnections = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "http_active_connections",
 		Help: "Number of active HTTP connections",
 	})
 )
-
-// Логгер
-type Logger struct {
-	logFilePath string
-	mu          sync.Mutex
-}
-
-func NewLogger(logDirectory string) *Logger {
-	absLogDir, err := filepath.Abs(logDirectory)
-	if err != nil {
-		fmt.Println("Invalid log path:", err)
-		return nil
-	}
-	if _, err := os.Stat(absLogDir); os.IsNotExist(err) {
-		os.MkdirAll(absLogDir, 0755)
-	}
-	logFileName := fmt.Sprintf("log_%s.json", time.Now().Format("20060102"))
-	logFilePath := filepath.Join(absLogDir, logFileName)
-	return &Logger{logFilePath: logFilePath}
-}
-
-func (l *Logger) Log(message string, level LogLevel, fields map[string]interface{}) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	levelStr := levelToString(level)
-	logEntry := map[string]interface{}{
-		"timestamp": time.Now().Format(time.RFC3339),
-		"level":     levelStr,
-		"message":   message,
-	}
-	for k, v := range fields {
-		logEntry[k] = v
-	}
-	jsonData, err := json.Marshal(logEntry)
-	if err != nil {
-		fmt.Println("Error marshaling log entry:", err)
-		return
-	}
-	fmt.Println(string(jsonData))
-	file, err := os.OpenFile(l.logFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		fmt.Println("Error writing to log:", err)
-		return
-	}
-	defer file.Close()
-	file.WriteString(string(jsonData) + "\n")
-}
-
-func levelToString(level LogLevel) string {
-	switch level {
-	case Info:
-		return "INFO"
-	case Warning:
-		return "WARNING"
-	case Error:
-		return "ERROR"
-	case Debug:
-		return "DEBUG"
-	default:
-		return "UNKNOWN"
-	}
-}
 
 // Конфигурация
 type ConfigParser struct {
@@ -127,7 +59,8 @@ type ConfigParser struct {
 	EnableMetrics  bool
 	EnableGzip     bool
 	TrustedProxies []string
-	logger         *Logger
+	logger         *logger.Logger
+	AntiDDoSConfig *antiddos.AntiDDoSConfig
 }
 
 type VirtualHost struct {
@@ -188,15 +121,13 @@ func (c *ConfigParser) Load(filePath string) error {
 			if strings.HasPrefix(section, "Host:") {
 				hostName := section[len("Host:"):]
 				currentHost = &VirtualHost{
-					Domain:    hostName,
-					BasicAuth: make(map[string]string),
-					CORS: CORSSettings{
-						AllowedMethods: []string{"GET", "POST", "HEAD"},
-					},
+					Domain:       hostName,
+					BasicAuth:    make(map[string]string),
+					CORS:         CORSSettings{AllowedMethods: []string{"GET", "POST", "HEAD"}},
 					RewriteRules: make(map[string]string),
 				}
 				c.VirtualHosts[hostName] = currentHost
-				c.logger.Log("Loaded host", Info, map[string]interface{}{"host": hostName})
+				c.logger.Info("Loaded host", map[string]interface{}{"host": hostName})
 			} else if section == "PHP" {
 				c.PHPConfig = &PHPSettings{}
 			} else if section == "NodeJS" {
@@ -220,7 +151,7 @@ func (c *ConfigParser) Load(filePath string) error {
 			case "InternalPort":
 				port, err := strconv.Atoi(value)
 				if err != nil || port <= 0 || port > 65535 {
-					c.logger.Log("Invalid InternalPort", Error, map[string]interface{}{"value": value, "error": err})
+					c.logger.Error("Invalid InternalPort", map[string]interface{}{"value": value, "error": err})
 					continue
 				}
 				currentHost.InternalPort = port
@@ -246,7 +177,7 @@ func (c *ConfigParser) Load(filePath string) error {
 			case "RateLimit":
 				rateLimit, err := strconv.Atoi(value)
 				if err != nil {
-					c.logger.Log("Invalid RateLimit", Error, map[string]interface{}{"value": value, "error": err})
+					c.logger.Error("Invalid RateLimit", map[string]interface{}{"value": value, "error": err})
 					continue
 				}
 				currentHost.RateLimit = rateLimit
@@ -263,7 +194,7 @@ func (c *ConfigParser) Load(filePath string) error {
 			case "BinaryPath":
 				absBinPath, err := filepath.Abs(value)
 				if err != nil {
-					c.logger.Log("Invalid PHP BinaryPath", Error, map[string]interface{}{"path": value, "error": err})
+					c.logger.Error("Invalid PHP BinaryPath", map[string]interface{}{"path": value, "error": err})
 					continue
 				}
 				c.PHPConfig.BinaryPath = absBinPath
@@ -277,14 +208,14 @@ func (c *ConfigParser) Load(filePath string) error {
 			case "ScriptPath":
 				absScriptPath, err := filepath.Abs(value)
 				if err != nil {
-					c.logger.Log("Invalid NodeJS ScriptPath", Error, map[string]interface{}{"path": value, "error": err})
+					c.logger.Error("Invalid NodeJS ScriptPath", map[string]interface{}{"path": value, "error": err})
 					continue
 				}
 				c.NodeConfig.ScriptPath = absScriptPath
 			case "InternalPort":
 				port, err := strconv.Atoi(value)
 				if err != nil || port <= 0 || port > 65535 {
-					c.logger.Log("Invalid NodeJS InternalPort", Error, map[string]interface{}{"value": value, "error": err})
+					c.logger.Error("Invalid NodeJS InternalPort", map[string]interface{}{"value": value, "error": err})
 					continue
 				}
 				c.NodeConfig.InternalPort = port
@@ -298,7 +229,7 @@ func (c *ConfigParser) Load(filePath string) error {
 			case "ConfigPath":
 				absConfigPath, err := filepath.Abs(value)
 				if err != nil {
-					c.logger.Log("Invalid ConfigPath", Error, map[string]interface{}{"path": value, "error": err})
+					c.logger.Error("Invalid ConfigPath", map[string]interface{}{"path": value, "error": err})
 					continue
 				}
 				c.ConfigPath = absConfigPath
@@ -318,6 +249,26 @@ func (c *ConfigParser) Load(filePath string) error {
 				c.EnableGzip, _ = strconv.ParseBool(value)
 			case "TrustedProxies":
 				c.TrustedProxies = strings.Split(value, ",")
+			case "AntiDDoSMaxRequestsPerSecond":
+				maxRequests, err := strconv.Atoi(value)
+				if err != nil {
+					c.logger.Error("Invalid AntiDDoSMaxRequestsPerSecond", map[string]interface{}{"value": value, "error": err})
+					continue
+				}
+				if c.AntiDDoSConfig == nil {
+					c.AntiDDoSConfig = &antiddos.AntiDDoSConfig{}
+				}
+				c.AntiDDoSConfig.MaxRequestsPerSecond = maxRequests
+			case "AntiDDoSBlockDuration":
+				duration, err := strconv.Atoi(value)
+				if err != nil {
+					c.logger.Error("Invalid AntiDDoSBlockDuration", map[string]interface{}{"value": value, "error": err})
+					continue
+				}
+				if c.AntiDDoSConfig == nil {
+					c.AntiDDoSConfig = &antiddos.AntiDDoSConfig{}
+				}
+				c.AntiDDoSConfig.BlockDuration = time.Duration(duration) * time.Second
 			}
 		}
 	}
@@ -327,10 +278,11 @@ func (c *ConfigParser) Load(filePath string) error {
 // Основная структура сервера
 type GubinNET struct {
 	config    *ConfigParser
-	logger    *Logger
+	logger    *logger.Logger
 	cache     map[string]*cacheEntry
 	mu        sync.Mutex
 	cookieJar http.CookieJar
+	upgrader  websocket.Upgrader
 }
 
 type cacheEntry struct {
@@ -342,20 +294,34 @@ type cacheEntry struct {
 
 // Запуск сервера
 func (g *GubinNET) Start() {
-	g.logger.Log("Starting server", Info, nil)
+	g.logger.Info("Starting server", nil)
 	g.cache = make(map[string]*cacheEntry)
+	antiDDoS := antiddos.NewAntiDDoS(g.config.AntiDDoSConfig, g.logger)
 	jar, err := cookiejar.New(nil)
 	if err != nil {
-		g.logger.Log("Failed to initialize cookie jar", Error, map[string]interface{}{"error": err})
+		g.logger.Error("Failed to initialize cookie jar", map[string]interface{}{"error": err})
 	} else {
 		g.cookieJar = jar
+	}
+	httpServer := &http.Server{
+		Addr:         fmt.Sprintf(":%d", g.config.ListenHTTP),
+		Handler:      g.recoveryMiddleware(g.loggingMiddleware(g.metricsMiddleware(antiDDoS.Middleware(g.handleRequest)))),
+		ReadTimeout:  g.config.RequestTimeout,
+		WriteTimeout: g.config.RequestTimeout,
+	}
+	g.upgrader = websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+		CheckOrigin: func(r *http.Request) bool {
+			return true
+		},
 	}
 	for _, host := range g.config.VirtualHosts {
 		if host.AppMode == "dotnet" && host.DllPath != "" && host.InternalPort != 0 {
 			go func(h *VirtualHost) {
 				err := g.startDotNetApp(h)
 				if err != nil {
-					g.logger.Log("Failed to start .NET app", Error, map[string]interface{}{
+					g.logger.Error("Failed to start .NET app", map[string]interface{}{
 						"host":  h.Domain,
 						"error": err,
 					})
@@ -365,7 +331,7 @@ func (g *GubinNET) Start() {
 			go func(h *VirtualHost) {
 				err := g.startNodeApp(h)
 				if err != nil {
-					g.logger.Log("Failed to start Node.js app", Error, map[string]interface{}{
+					g.logger.Error("Failed to start Node.js app", map[string]interface{}{
 						"host":  h.Domain,
 						"error": err,
 					})
@@ -373,19 +339,13 @@ func (g *GubinNET) Start() {
 			}(host)
 		}
 	}
-	httpServer := &http.Server{
-		Addr:         fmt.Sprintf(":%d", g.config.ListenHTTP),
-		Handler:      g.recoveryMiddleware(g.loggingMiddleware(g.metricsMiddleware(g.handleRequest))),
-		ReadTimeout:  g.config.RequestTimeout,
-		WriteTimeout: g.config.RequestTimeout,
-	}
 	go func() {
-		g.logger.Log("HTTP server started", Info, map[string]interface{}{
+		g.logger.Info("HTTP server started", map[string]interface{}{
 			"port": g.config.ListenHTTP,
 		})
 		err := httpServer.ListenAndServe()
 		if err != nil && err != http.ErrServerClosed {
-			g.logger.Log("HTTP server error", Error, map[string]interface{}{
+			g.logger.Error("HTTP server error", map[string]interface{}{
 				"error": err,
 			})
 		}
@@ -399,7 +359,7 @@ func (g *GubinNET) Start() {
 			}
 			cert, err := tls.LoadX509KeyPair(host.SSLCertificate, host.SSLKey)
 			if err != nil {
-				g.logger.Log("Failed to load certificate", Error, map[string]interface{}{
+				g.logger.Error("Failed to load certificate", map[string]interface{}{
 					"host":  hello.ServerName,
 					"error": err,
 				})
@@ -417,12 +377,12 @@ func (g *GubinNET) Start() {
 		WriteTimeout: g.config.RequestTimeout,
 	}
 	go func() {
-		g.logger.Log("HTTPS server started", Info, map[string]interface{}{
+		g.logger.Info("HTTPS server started", map[string]interface{}{
 			"port": g.config.ListenHTTPS,
 		})
 		err := httpsServer.ListenAndServeTLS("", "")
 		if err != nil && err != http.ErrServerClosed {
-			g.logger.Log("HTTPS server error", Error, map[string]interface{}{
+			g.logger.Error("HTTPS server error", map[string]interface{}{
 				"error": err,
 			})
 		}
@@ -436,12 +396,12 @@ func (g *GubinNET) Start() {
 				Addr:    ":9090",
 				Handler: metricsMux,
 			}
-			g.logger.Log("Metrics server started", Info, map[string]interface{}{
+			g.logger.Info("Metrics server started", map[string]interface{}{
 				"port": 9090,
 			})
 			err := metricsServer.ListenAndServe()
 			if err != nil && err != http.ErrServerClosed {
-				g.logger.Log("Metrics server error", Error, map[string]interface{}{
+				g.logger.Error("Metrics server error", map[string]interface{}{
 					"error": err,
 				})
 			}
@@ -458,12 +418,12 @@ func (g *GubinNET) Start() {
 			Addr:    ":8081",
 			Handler: healthMux,
 		}
-		g.logger.Log("Health server started", Info, map[string]interface{}{
+		g.logger.Info("Health server started", map[string]interface{}{
 			"port": 8081,
 		})
 		err := healthServer.ListenAndServe()
 		if err != nil && err != http.ErrServerClosed {
-			g.logger.Log("Health server error", Error, map[string]interface{}{
+			g.logger.Error("Health server error", map[string]interface{}{
 				"error": err,
 			})
 		}
@@ -474,15 +434,15 @@ func (g *GubinNET) Start() {
 		for sig := range sigChan {
 			switch sig {
 			case syscall.SIGHUP:
-				g.logger.Log("Reloading configuration", Info, nil)
+				g.logger.Info("Reloading configuration", nil)
 				err := g.config.Load(g.config.ConfigPath)
 				if err != nil {
-					g.logger.Log("Failed to reload config", Error, map[string]interface{}{
+					g.logger.Error("Failed to reload config", map[string]interface{}{
 						"error": err,
 					})
 				}
 			case os.Interrupt, syscall.SIGTERM:
-				g.logger.Log("Shutting down server", Info, nil)
+				g.logger.Info("Shutting down server", nil)
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
 				httpServer.Shutdown(ctx)
@@ -493,14 +453,14 @@ func (g *GubinNET) Start() {
 				healthServer.Shutdown(ctx)
 				for _, host := range g.config.VirtualHosts {
 					if host.AppProcess != nil {
-						g.logger.Log("Stopping app", Info, map[string]interface{}{
+						g.logger.Info("Stopping app", map[string]interface{}{
 							"host": host.Domain,
 							"pid":  host.AppProcess.Pid,
 						})
 						host.AppProcess.Signal(syscall.SIGTERM)
 					}
 				}
-				g.logger.Log("Server gracefully stopped", Info, nil)
+				g.logger.Info("Server gracefully stopped", nil)
 				return
 			}
 		}
@@ -513,7 +473,7 @@ func (g *GubinNET) recoveryMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		defer func() {
 			if err := recover(); err != nil {
 				w.WriteHeader(http.StatusInternalServerError)
-				g.logger.Log("Recovered from panic", Error, map[string]interface{}{
+				g.logger.Error("Recovered from panic", map[string]interface{}{
 					"error": err,
 					"path":  r.URL.Path,
 				})
@@ -531,7 +491,7 @@ func (g *GubinNET) loggingMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		if requestID == "" {
 			requestID = fmt.Sprintf("%d", time.Now().UnixNano())
 		}
-		g.logger.Log("Request started", Info, map[string]interface{}{
+		g.logger.Info("Request started", map[string]interface{}{
 			"request_id": requestID,
 			"method":     r.Method,
 			"path":       r.URL.Path,
@@ -541,7 +501,7 @@ func (g *GubinNET) loggingMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		w.Header().Set("X-Request-ID", requestID)
 		ww := &responseWriterWrapper{w: w}
 		next(ww, r)
-		g.logger.Log("Request completed", Info, map[string]interface{}{
+		g.logger.Info("Request completed", map[string]interface{}{
 			"request_id":  requestID,
 			"method":      r.Method,
 			"path":        r.URL.Path,
@@ -602,7 +562,7 @@ func (g *GubinNET) startDotNetApp(host *VirtualHost) error {
 		return err
 	}
 	host.AppProcess = cmd.Process
-	g.logger.Log("Started .NET app", Info, map[string]interface{}{
+	g.logger.Info("Started .NET app", map[string]interface{}{
 		"host": host.Domain,
 		"pid":  cmd.Process.Pid,
 	})
@@ -622,7 +582,7 @@ func (g *GubinNET) startNodeApp(host *VirtualHost) error {
 		return err
 	}
 	host.AppProcess = cmd.Process
-	g.logger.Log("Started Node.js app", Info, map[string]interface{}{
+	g.logger.Info("Started Node.js app", map[string]interface{}{
 		"host": host.Domain,
 		"pid":  cmd.Process.Pid,
 	})
@@ -646,12 +606,15 @@ func RegisterPlugin(p Plugin) {
 func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
 	for _, plugin := range registeredPlugins {
 		if plugin.Execute(w, r) {
-			return // Если плагин обработал запрос, завершаем выполнение
+			return
 		}
 	}
-
+	if r.URL.Path == "/ws" {
+		g.handleWebSocket(w, r)
+		return
+	}
 	w.Header().Del("Server")
-	w.Header().Set("Server", "GubinNET/1.2")
+	w.Header().Set("Server", "GubinNET/1.3")
 	if g.config.MaxRequestSize > 0 {
 		r.Body = http.MaxBytesReader(w, r.Body, g.config.MaxRequestSize)
 	}
@@ -922,7 +885,7 @@ func (g *GubinNET) serveErrorPage(w http.ResponseWriter, r *http.Request, status
 <body>
     <h1>Error %d</h1>
     <p>%s</p>
-    <p>Server: GubinNET/1.2</p>
+    <p>Server: GubinNET/1.3</p>
     <p>Request ID: %s</p>
 </body>
 </html>
@@ -944,8 +907,30 @@ func getRealIP(r *http.Request) string {
 	return ip
 }
 
+// Обработка WebSocket соединений
+func (g *GubinNET) handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	conn, err := g.upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Println("WebSocket upgrade error:", err)
+		return
+	}
+	defer conn.Close()
+	for {
+		messageType, message, err := conn.ReadMessage()
+		if err != nil {
+			log.Println("WebSocket read error:", err)
+			break
+		}
+		log.Printf("Received: %s", message)
+		if err := conn.WriteMessage(messageType, message); err != nil {
+			log.Println("WebSocket write error:", err)
+			break
+		}
+	}
+}
+
 func main() {
-	logger := NewLogger("/etc/gubinnet/logs")
+	logger := logger.NewLogger("/etc/gubinnet/logs")
 	if logger == nil {
 		fmt.Println("Failed to initialize logger")
 		os.Exit(1)
@@ -963,22 +948,12 @@ func main() {
 	}
 	err := config.Load(configPath)
 	if err != nil {
-		logger.Log("Failed to load config", Error, map[string]interface{}{
+		logger.Error("Failed to load config", map[string]interface{}{
 			"error": err,
 			"path":  configPath,
 		})
 		os.Exit(1)
 	}
-
-	// Автоматическая загрузка плагинов
-	pluginDir := ".\\plugins" // Укажите правильный путь к плагинам
-	err = pluginregistry.LoadPlugins(pluginDir)
-	if err != nil {
-		logger.Log("Failed to load plugins", Error, map[string]interface{}{
-			"error": err,
-		})
-	}
-
 	server := &GubinNET{
 		config: config,
 		logger: logger,
