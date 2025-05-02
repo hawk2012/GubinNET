@@ -1,0 +1,15 @@
+[Unit]
+Description=GubinNet Service
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/etc/gubinnet/gubinnet
+Restart=always
+User=root
+WorkingDirectory=/etc/gubinnet/
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

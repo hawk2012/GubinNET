@@ -33,13 +33,11 @@ var (
 		Name: "http_requests_total",
 		Help: "Total number of HTTP requests",
 	}, []string{"method", "path", "status"})
-
 	requestDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "http_request_duration_seconds",
 		Help:    "Duration of HTTP requests",
 		Buckets: []float64{0.1, 0.5, 1, 2.5, 5, 10},
 	}, []string{"method", "path"})
-
 	activeConnections = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "http_active_connections",
 		Help: "Number of active HTTP connections",
@@ -75,6 +73,7 @@ type VirtualHost struct {
 	DllPath        string
 	AppProcess     *os.Process
 	SPAFallback    string
+	AppType        string // НОВОЕ ПОЛЕ
 	BasicAuth      map[string]string
 	CORS           CORSSettings
 	RateLimit      int
@@ -165,6 +164,8 @@ func (c *ConfigParser) Load(filePath string) error {
 				currentHost.DllPath = value
 			case "SPAFallback":
 				currentHost.SPAFallback = value
+			case "AppType": // НОВАЯ ДИРЕКТИВА
+				currentHost.AppType = value
 			case "BasicAuth":
 				authParts := strings.SplitN(value, ":", 2)
 				if len(authParts) == 2 {
@@ -604,36 +605,51 @@ func RegisterPlugin(p Plugin) {
 
 // Обработка запросов
 func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
+	// Проверка плагинов
 	for _, plugin := range registeredPlugins {
 		if plugin.Execute(w, r) {
 			return
 		}
 	}
+
+	// WebSocket handling
 	if r.URL.Path == "/ws" {
 		g.handleWebSocket(w, r)
 		return
 	}
+
 	w.Header().Del("Server")
-	w.Header().Set("Server", "GubinNET/1.3")
+	w.Header().Set("Server", "GubinNET/1.4")
+
+	// Ограничение размера запроса
 	if g.config.MaxRequestSize > 0 {
 		r.Body = http.MaxBytesReader(w, r.Body, g.config.MaxRequestSize)
 	}
+
+	// Защита от path traversal
 	if strings.Contains(r.URL.Path, "../") {
 		g.serveErrorPage(w, r, http.StatusBadRequest, "Invalid URL path")
 		return
 	}
+
+	// Получение хоста из заголовков
 	hostHeader := strings.Split(r.Host, ":")[0]
 	host, exists := g.config.VirtualHosts[hostHeader]
 	if !exists {
 		g.serveErrorPage(w, r, http.StatusNotFound, "Host not found")
 		return
 	}
+
+	// Redirect HTTP to HTTPS if SSL certificate is present
+	if r.TLS == nil && host.SSLCertificate != "" && host.SSLKey != "" {
+		redirectURL := fmt.Sprintf("https://%s%s", host.Domain, r.RequestURI)
+		http.Redirect(w, r, redirectURL, http.StatusPermanentRedirect)
+		return
+	}
+
+	// Rate limiting
 	if host.RateLimit > 0 {
-		ip := r.RemoteAddr
-		if proxyIndex := strings.Index(ip, ","); proxyIndex != -1 {
-			ip = ip[:proxyIndex]
-		}
-		ip = strings.TrimSpace(strings.Split(ip, ":")[0])
+		ip := getRealIP(r)
 		clientKey := ip + ":" + host.Domain
 		rateLimiterLock.Lock()
 		if _, exists := rateLimiter[clientKey]; !exists {
@@ -648,6 +664,8 @@ func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
 		}
 		rateLimiterLock.Unlock()
 	}
+
+	// Basic Authentication
 	if len(host.BasicAuth) > 0 {
 		username, password, ok := r.BasicAuth()
 		if !ok || host.BasicAuth[username] != password {
@@ -656,6 +674,8 @@ func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+
+	// CORS Handling
 	if len(host.CORS.AllowedOrigins) > 0 {
 		origin := r.Header.Get("Origin")
 		if origin != "" {
@@ -675,12 +695,52 @@ func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+
+	// Rewrite rules with conditions
+	originalPath := r.URL.Path
+	query := r.URL.RawQuery
 	for pattern, target := range host.RewriteRules {
 		if matched, _ := filepath.Match(pattern, r.URL.Path); matched {
-			r.URL.Path = target
+			// Check for conditions in the rewrite rule
+			parts := strings.Split(target, " ")
+			if len(parts) > 1 {
+				condition := parts[0]
+				targetPath := parts[1]
+
+				switch condition {
+				case "if":
+					// Example: "if -f /path/to/file"
+					if len(parts) >= 4 && parts[2] == "-f" {
+						filePath := parts[3]
+						if _, err := os.Stat(filePath); err == nil {
+							r.URL.Path = targetPath
+							break
+						}
+					}
+				default:
+					r.URL.Path = targetPath
+				}
+			} else {
+				r.URL.Path = target
+			}
+
+			// Append query string if it exists
+			if query != "" {
+				r.URL.RawQuery = query
+			}
+
 			break
 		}
 	}
+
+	// Если путь изменился после rewrite, выполнить новый запрос
+	if r.URL.Path != originalPath {
+		r.RequestURI = r.URL.RequestURI()
+		g.handleRequest(w, r)
+		return
+	}
+
+	// Proxy or serve application
 	if host.DefaultProxy != "" || (host.AppMode == "dotnet" && host.InternalPort != 0) || (host.AppMode == "nodejs" && g.config.NodeConfig.Enabled && g.config.NodeConfig.InternalPort != 0) {
 		var proxyUrl string
 		if host.DefaultProxy != "" {
@@ -693,6 +753,8 @@ func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
 		g.proxyRequest(w, r, proxyUrl)
 		return
 	}
+
+	// Serve file or SPA
 	g.serveFileOrSpa(w, r, host)
 }
 
@@ -885,7 +947,7 @@ func (g *GubinNET) serveErrorPage(w http.ResponseWriter, r *http.Request, status
 <body>
     <h1>Error %d</h1>
     <p>%s</p>
-    <p>Server: GubinNET/1.3</p>
+    <p>Server: GubinNET/1.4</p>
     <p>Request ID: %s</p>
 </body>
 </html>
@@ -942,10 +1004,26 @@ func main() {
 		EnableMetrics:  true,
 		EnableGzip:     true,
 	}
+
+	// Определение пути к конфигурационному файлу
 	configPath := os.Getenv("GUBINNET_CONFIG")
 	if configPath == "" {
-		configPath = "/etc/gubinnet/config.ini"
+		// Для Windows ищем файл рядом с исполняемым файлом
+		if os.PathSeparator == '\\' {
+			exePath, err := os.Executable()
+			if err != nil {
+				logger.Error("Failed to get executable path", map[string]interface{}{
+					"error": err,
+				})
+				os.Exit(1)
+			}
+			configPath = filepath.Join(filepath.Dir(exePath), "config.ini")
+		} else {
+			// Для других систем используем прежний путь
+			configPath = "/etc/gubinnet/config.ini"
+		}
 	}
+
 	err := config.Load(configPath)
 	if err != nil {
 		logger.Error("Failed to load config", map[string]interface{}{
