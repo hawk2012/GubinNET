@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"os"
@@ -25,6 +26,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/quic-go/quic-go/http3"
 )
 
 // Метрики Prometheus
@@ -278,12 +280,14 @@ func (c *ConfigParser) Load(filePath string) error {
 
 // Основная структура сервера
 type GubinNET struct {
-	config    *ConfigParser
-	logger    *logger.Logger
-	cache     map[string]*cacheEntry
-	mu        sync.Mutex
-	cookieJar http.CookieJar
-	upgrader  websocket.Upgrader
+	config     *ConfigParser
+	logger     *logger.Logger
+	cache      map[string]*cacheEntry
+	mu         sync.Mutex
+	cookieJar  http.CookieJar
+	upgrader   websocket.Upgrader
+	h3Server   *http3.Server
+	h3Listener net.PacketConn
 }
 
 type cacheEntry struct {
@@ -304,19 +308,8 @@ func (g *GubinNET) Start() {
 	} else {
 		g.cookieJar = jar
 	}
-	httpServer := &http.Server{
-		Addr:         fmt.Sprintf(":%d", g.config.ListenHTTP),
-		Handler:      g.recoveryMiddleware(g.loggingMiddleware(g.metricsMiddleware(antiDDoS.Middleware(g.handleRequest)))),
-		ReadTimeout:  g.config.RequestTimeout,
-		WriteTimeout: g.config.RequestTimeout,
-	}
-	g.upgrader = websocket.Upgrader{
-		ReadBufferSize:  1024,
-		WriteBufferSize: 1024,
-		CheckOrigin: func(r *http.Request) bool {
-			return true
-		},
-	}
+
+	// Запуск приложений для каждого хоста
 	for _, host := range g.config.VirtualHosts {
 		if host.AppMode == "dotnet" && host.DllPath != "" && host.InternalPort != 0 {
 			go func(h *VirtualHost) {
@@ -340,17 +333,16 @@ func (g *GubinNET) Start() {
 			}(host)
 		}
 	}
-	go func() {
-		g.logger.Info("HTTP server started", map[string]interface{}{
-			"port": g.config.ListenHTTP,
-		})
-		err := httpServer.ListenAndServe()
-		if err != nil && err != http.ErrServerClosed {
-			g.logger.Error("HTTP server error", map[string]interface{}{
-				"error": err,
-			})
-		}
-	}()
+
+	// HTTP/1.1 server
+	httpServer := &http.Server{
+		Addr:         fmt.Sprintf(":%d", g.config.ListenHTTP),
+		Handler:      g.recoveryMiddleware(g.loggingMiddleware(g.metricsMiddleware(antiDDoS.Middleware(g.handleRequest)))),
+		ReadTimeout:  g.config.RequestTimeout,
+		WriteTimeout: g.config.RequestTimeout,
+	}
+
+	// HTTPS server with HTTP/2 support
 	tlsConfig := &tls.Config{
 		MinVersion: tls.VersionTLS12,
 		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
@@ -377,6 +369,51 @@ func (g *GubinNET) Start() {
 		ReadTimeout:  g.config.RequestTimeout,
 		WriteTimeout: g.config.RequestTimeout,
 	}
+
+	// HTTP/3 server configuration
+	h3Mux := http.NewServeMux()
+	h3Mux.Handle("/", httpsServer.Handler)
+	g.h3Server = &http3.Server{
+		Addr:      fmt.Sprintf(":%d", g.config.ListenHTTPS+1),
+		TLSConfig: tlsConfig,
+		Handler:   h3Mux,
+	}
+
+	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{
+		Port: g.config.ListenHTTPS + 1,
+	})
+	if err != nil {
+		g.logger.Error("Failed to create UDP listener for HTTP/3", map[string]interface{}{
+			"error": err,
+		})
+	} else {
+		g.h3Listener = udpConn
+		go func() {
+			g.logger.Info("HTTP/3 server started", map[string]interface{}{
+				"port": g.config.ListenHTTPS + 1,
+			})
+			err := g.h3Server.Serve(g.h3Listener)
+			if err != nil && err != http.ErrServerClosed {
+				g.logger.Error("HTTP/3 server error", map[string]interface{}{
+					"error": err,
+				})
+			}
+		}()
+	}
+
+	// Start servers in goroutines
+	go func() {
+		g.logger.Info("HTTP server started", map[string]interface{}{
+			"port": g.config.ListenHTTP,
+		})
+		err := httpServer.ListenAndServe()
+		if err != nil && err != http.ErrServerClosed {
+			g.logger.Error("HTTP server error", map[string]interface{}{
+				"error": err,
+			})
+		}
+	}()
+
 	go func() {
 		g.logger.Info("HTTPS server started", map[string]interface{}{
 			"port": g.config.ListenHTTPS,
@@ -388,6 +425,7 @@ func (g *GubinNET) Start() {
 			})
 		}
 	}()
+
 	var metricsServer *http.Server
 	if g.config.EnableMetrics {
 		go func() {
@@ -408,6 +446,7 @@ func (g *GubinNET) Start() {
 			}
 		}()
 	}
+
 	var healthServer *http.Server
 	go func() {
 		healthMux := http.NewServeMux()
@@ -429,6 +468,7 @@ func (g *GubinNET) Start() {
 			})
 		}
 	}()
+
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	go func() {
@@ -446,12 +486,20 @@ func (g *GubinNET) Start() {
 				g.logger.Info("Shutting down server", nil)
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
+
 				httpServer.Shutdown(ctx)
 				httpsServer.Shutdown(ctx)
+				if g.h3Server != nil {
+					g.h3Server.Close()
+				}
+				if g.h3Listener != nil {
+					g.h3Listener.Close()
+				}
 				if g.config.EnableMetrics {
 					metricsServer.Shutdown(ctx)
 				}
 				healthServer.Shutdown(ctx)
+
 				for _, host := range g.config.VirtualHosts {
 					if host.AppProcess != nil {
 						g.logger.Info("Stopping app", map[string]interface{}{
@@ -611,27 +659,22 @@ func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-
 	// WebSocket handling
 	if r.URL.Path == "/ws" {
 		g.handleWebSocket(w, r)
 		return
 	}
-
 	w.Header().Del("Server")
 	w.Header().Set("Server", "GubinNET/1.4")
-
 	// Ограничение размера запроса
 	if g.config.MaxRequestSize > 0 {
 		r.Body = http.MaxBytesReader(w, r.Body, g.config.MaxRequestSize)
 	}
-
 	// Защита от path traversal
 	if strings.Contains(r.URL.Path, "../") {
 		g.serveErrorPage(w, r, http.StatusBadRequest, "Invalid URL path")
 		return
 	}
-
 	// Получение хоста из заголовков
 	hostHeader := strings.Split(r.Host, ":")[0]
 	host, exists := g.config.VirtualHosts[hostHeader]
@@ -639,14 +682,12 @@ func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
 		g.serveErrorPage(w, r, http.StatusNotFound, "Host not found")
 		return
 	}
-
 	// Redirect HTTP to HTTPS if SSL certificate is present
 	if r.TLS == nil && host.SSLCertificate != "" && host.SSLKey != "" {
 		redirectURL := fmt.Sprintf("https://%s%s", host.Domain, r.RequestURI)
 		http.Redirect(w, r, redirectURL, http.StatusPermanentRedirect)
 		return
 	}
-
 	// Rate limiting
 	if host.RateLimit > 0 {
 		ip := getRealIP(r)
@@ -664,7 +705,6 @@ func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
 		}
 		rateLimiterLock.Unlock()
 	}
-
 	// Basic Authentication
 	if len(host.BasicAuth) > 0 {
 		username, password, ok := r.BasicAuth()
@@ -674,7 +714,6 @@ func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-
 	// CORS Handling
 	if len(host.CORS.AllowedOrigins) > 0 {
 		origin := r.Header.Get("Origin")
@@ -695,7 +734,6 @@ func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-
 	// Rewrite rules with conditions
 	originalPath := r.URL.Path
 	query := r.URL.RawQuery
@@ -706,7 +744,6 @@ func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
 			if len(parts) > 1 {
 				condition := parts[0]
 				targetPath := parts[1]
-
 				switch condition {
 				case "if":
 					// Example: "if -f /path/to/file"
@@ -723,23 +760,19 @@ func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
 			} else {
 				r.URL.Path = target
 			}
-
 			// Append query string if it exists
 			if query != "" {
 				r.URL.RawQuery = query
 			}
-
 			break
 		}
 	}
-
 	// Если путь изменился после rewrite, выполнить новый запрос
 	if r.URL.Path != originalPath {
 		r.RequestURI = r.URL.RequestURI()
 		g.handleRequest(w, r)
 		return
 	}
-
 	// Proxy or serve application
 	if host.DefaultProxy != "" || (host.AppMode == "dotnet" && host.InternalPort != 0) || (host.AppMode == "nodejs" && g.config.NodeConfig.Enabled && g.config.NodeConfig.InternalPort != 0) {
 		var proxyUrl string
@@ -753,7 +786,6 @@ func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
 		g.proxyRequest(w, r, proxyUrl)
 		return
 	}
-
 	// Serve file or SPA
 	g.serveFileOrSpa(w, r, host)
 }
@@ -929,6 +961,15 @@ func getContentType(filePath string) string {
 
 // Страница ошибки
 func (g *GubinNET) serveErrorPage(w http.ResponseWriter, r *http.Request, statusCode int, message string) {
+	g.logger.Info("Error page served", map[string]interface{}{
+		"path":       r.URL.Path,
+		"method":     r.Method,
+		"status":     statusCode,
+		"message":    message,
+		"remote":     r.RemoteAddr,
+		"user_agent": r.UserAgent(),
+	})
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(statusCode)
 	html := fmt.Sprintf(`
@@ -1032,10 +1073,24 @@ func main() {
 		})
 		os.Exit(1)
 	}
+
+	// Инициализация сервера
 	server := &GubinNET{
 		config: config,
 		logger: logger,
+		cache:  make(map[string]*cacheEntry),
+		upgrader: websocket.Upgrader{
+			ReadBufferSize:  1024,
+			WriteBufferSize: 1024,
+			CheckOrigin: func(r *http.Request) bool {
+				return true // Разрешаем все источники для WebSocket
+			},
+		},
 	}
+
+	// Запуск основного сервера
 	server.Start()
+
+	// Блокировка основного потока для предотвращения завершения программы
 	select {}
 }
