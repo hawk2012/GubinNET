@@ -3,6 +3,7 @@ package main
 import (
 	"GubinNET/antiddos"
 	"GubinNET/logger"
+	"bufio"
 	"compress/gzip"
 	"context"
 	"crypto/tls"
@@ -100,184 +101,6 @@ type NodeSettings struct {
 	InternalPort int
 }
 
-// Загрузка конфигурации
-func (c *ConfigParser) Load(filePath string) error {
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		return fmt.Errorf("config file not found: %s", filePath)
-	}
-	data, err := os.ReadFile(filePath)
-	if err != nil {
-		return err
-	}
-	lines := strings.Split(string(data), "\n")
-	c.VirtualHosts = make(map[string]*VirtualHost)
-	var currentHost *VirtualHost
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, ";") {
-			continue
-		}
-		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
-			section := line[1 : len(line)-1]
-			if strings.HasPrefix(section, "Host:") {
-				hostName := section[len("Host:"):]
-				currentHost = &VirtualHost{
-					Domain:       hostName,
-					BasicAuth:    make(map[string]string),
-					CORS:         CORSSettings{AllowedMethods: []string{"GET", "POST", "HEAD"}},
-					RewriteRules: make(map[string]string),
-				}
-				c.VirtualHosts[hostName] = currentHost
-				c.logger.Info("Loaded host", map[string]interface{}{"host": hostName})
-			} else if section == "PHP" {
-				c.PHPConfig = &PHPSettings{}
-			} else if section == "NodeJS" {
-				c.NodeConfig = &NodeSettings{}
-			}
-			continue
-		}
-		parts := strings.SplitN(line, "=", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		key, value := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
-		if currentHost != nil {
-			switch key {
-			case "BasePath":
-				currentHost.BasePath = value
-			case "WebRootPath":
-				currentHost.WebRootPath = value
-			case "DefaultProxy":
-				currentHost.DefaultProxy = value
-			case "InternalPort":
-				port, err := strconv.Atoi(value)
-				if err != nil || port <= 0 || port > 65535 {
-					c.logger.Error("Invalid InternalPort", map[string]interface{}{"value": value, "error": err})
-					continue
-				}
-				currentHost.InternalPort = port
-			case "SSLCertificate":
-				currentHost.SSLCertificate = value
-			case "SSLKey":
-				currentHost.SSLKey = value
-			case "AppMode":
-				currentHost.AppMode = value
-			case "DllPath":
-				currentHost.DllPath = value
-			case "SPAFallback":
-				currentHost.SPAFallback = value
-			case "AppType": // НОВАЯ ДИРЕКТИВА
-				currentHost.AppType = value
-			case "BasicAuth":
-				authParts := strings.SplitN(value, ":", 2)
-				if len(authParts) == 2 {
-					currentHost.BasicAuth[authParts[0]] = authParts[1]
-				}
-			case "CORSAllowedOrigins":
-				currentHost.CORS.AllowedOrigins = strings.Split(value, ",")
-			case "CORSAllowedHeaders":
-				currentHost.CORS.AllowedHeaders = strings.Split(value, ",")
-			case "RateLimit":
-				rateLimit, err := strconv.Atoi(value)
-				if err != nil {
-					c.logger.Error("Invalid RateLimit", map[string]interface{}{"value": value, "error": err})
-					continue
-				}
-				currentHost.RateLimit = rateLimit
-			case "RewriteRule":
-				parts := strings.SplitN(value, " ", 2)
-				if len(parts) == 2 {
-					currentHost.RewriteRules[parts[0]] = parts[1]
-				}
-			}
-		} else if c.PHPConfig != nil {
-			switch key {
-			case "Enabled":
-				c.PHPConfig.Enabled, _ = strconv.ParseBool(value)
-			case "BinaryPath":
-				absBinPath, err := filepath.Abs(value)
-				if err != nil {
-					c.logger.Error("Invalid PHP BinaryPath", map[string]interface{}{"path": value, "error": err})
-					continue
-				}
-				c.PHPConfig.BinaryPath = absBinPath
-			case "WebRootPath":
-				c.PHPConfig.WebRootPath = value
-			}
-		} else if c.NodeConfig != nil {
-			switch key {
-			case "Enabled":
-				c.NodeConfig.Enabled, _ = strconv.ParseBool(value)
-			case "ScriptPath":
-				absScriptPath, err := filepath.Abs(value)
-				if err != nil {
-					c.logger.Error("Invalid NodeJS ScriptPath", map[string]interface{}{"path": value, "error": err})
-					continue
-				}
-				c.NodeConfig.ScriptPath = absScriptPath
-			case "InternalPort":
-				port, err := strconv.Atoi(value)
-				if err != nil || port <= 0 || port > 65535 {
-					c.logger.Error("Invalid NodeJS InternalPort", map[string]interface{}{"value": value, "error": err})
-					continue
-				}
-				c.NodeConfig.InternalPort = port
-			}
-		} else {
-			switch key {
-			case "ListenHTTP":
-				c.ListenHTTP, _ = strconv.Atoi(value)
-			case "ListenHTTPS":
-				c.ListenHTTPS, _ = strconv.Atoi(value)
-			case "ConfigPath":
-				absConfigPath, err := filepath.Abs(value)
-				if err != nil {
-					c.logger.Error("Invalid ConfigPath", map[string]interface{}{"path": value, "error": err})
-					continue
-				}
-				c.ConfigPath = absConfigPath
-			case "MaxRequestSize":
-				size, err := strconv.ParseInt(value, 10, 64)
-				if err == nil {
-					c.MaxRequestSize = size
-				}
-			case "RequestTimeout":
-				timeout, err := time.ParseDuration(value)
-				if err == nil {
-					c.RequestTimeout = timeout
-				}
-			case "EnableMetrics":
-				c.EnableMetrics, _ = strconv.ParseBool(value)
-			case "EnableGzip":
-				c.EnableGzip, _ = strconv.ParseBool(value)
-			case "TrustedProxies":
-				c.TrustedProxies = strings.Split(value, ",")
-			case "AntiDDoSMaxRequestsPerSecond":
-				maxRequests, err := strconv.Atoi(value)
-				if err != nil {
-					c.logger.Error("Invalid AntiDDoSMaxRequestsPerSecond", map[string]interface{}{"value": value, "error": err})
-					continue
-				}
-				if c.AntiDDoSConfig == nil {
-					c.AntiDDoSConfig = &antiddos.AntiDDoSConfig{}
-				}
-				c.AntiDDoSConfig.MaxRequestsPerSecond = maxRequests
-			case "AntiDDoSBlockDuration":
-				duration, err := strconv.Atoi(value)
-				if err != nil {
-					c.logger.Error("Invalid AntiDDoSBlockDuration", map[string]interface{}{"value": value, "error": err})
-					continue
-				}
-				if c.AntiDDoSConfig == nil {
-					c.AntiDDoSConfig = &antiddos.AntiDDoSConfig{}
-				}
-				c.AntiDDoSConfig.BlockDuration = time.Duration(duration) * time.Second
-			}
-		}
-	}
-	return nil
-}
-
 // Основная структура сервера
 type GubinNET struct {
 	config     *ConfigParser
@@ -295,6 +118,109 @@ type cacheEntry struct {
 	modTime     time.Time
 	size        int64
 	contentType string
+}
+
+// Загрузка конфигурации
+func (c *ConfigParser) Load(configPath string) error {
+	file, err := os.Open(configPath)
+	if err != nil {
+		return fmt.Errorf("failed to open config file: %w", err)
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	c.VirtualHosts = make(map[string]*VirtualHost)
+
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue // Пропускаем пустые строки и комментарии
+		}
+
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue // Пропускаем некорректные строки
+		}
+
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+
+		switch key {
+		case "ListenHTTP":
+			port, err := strconv.Atoi(value)
+			if err != nil {
+				return fmt.Errorf("invalid ListenHTTP value: %w", err)
+			}
+			c.ListenHTTP = port
+		case "ListenHTTPS":
+			port, err := strconv.Atoi(value)
+			if err != nil {
+				return fmt.Errorf("invalid ListenHTTPS value: %w", err)
+			}
+			c.ListenHTTPS = port
+		case "MaxRequestSize":
+			size, err := strconv.ParseInt(value, 10, 64)
+			if err != nil {
+				return fmt.Errorf("invalid MaxRequestSize value: %w", err)
+			}
+			c.MaxRequestSize = size
+		case "EnableMetrics":
+			c.EnableMetrics = value == "true"
+		case "EnableGzip":
+			c.EnableGzip = value == "true"
+		default:
+			// Обработка виртуальных хостов
+			if strings.HasPrefix(key, "VirtualHost.") {
+				hostParts := strings.SplitN(key, ".", 3)
+				if len(hostParts) != 3 {
+					continue
+				}
+				domain := hostParts[1]
+				field := hostParts[2]
+
+				host, exists := c.VirtualHosts[domain]
+				if !exists {
+					host = &VirtualHost{Domain: domain}
+					c.VirtualHosts[domain] = host
+				}
+
+				switch field {
+				case "BasePath":
+					host.BasePath = value
+				case "WebRootPath":
+					host.WebRootPath = value
+				case "DefaultProxy":
+					host.DefaultProxy = value
+				case "InternalPort":
+					port, err := strconv.Atoi(value)
+					if err == nil {
+						host.InternalPort = port
+					}
+				case "SSLCertificate":
+					host.SSLCertificate = value
+				case "SSLKey":
+					host.SSLKey = value
+				case "AppMode":
+					host.AppMode = value
+				case "DllPath":
+					host.DllPath = value
+				case "SPAFallback":
+					host.SPAFallback = value
+				case "RateLimit":
+					rate, err := strconv.Atoi(value)
+					if err == nil {
+						host.RateLimit = rate
+					}
+				}
+			}
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("error reading config file: %w", err)
+	}
+
+	return nil
 }
 
 // Запуск сервера
@@ -342,7 +268,7 @@ func (g *GubinNET) Start() {
 		WriteTimeout: g.config.RequestTimeout,
 	}
 
-	// HTTPS server with HTTP/2 support
+	// HTTPS server with HTTP/2 and HTTP/3 support
 	tlsConfig := &tls.Config{
 		MinVersion: tls.VersionTLS12,
 		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
@@ -360,8 +286,9 @@ func (g *GubinNET) Start() {
 			}
 			return &cert, nil
 		},
-		NextProtos: []string{"h2", "http/1.1"},
+		NextProtos: []string{"h3", "h2", "http/1.1"}, // Updated ALPN protocols
 	}
+
 	httpsServer := &http.Server{
 		Addr:         fmt.Sprintf(":%d", g.config.ListenHTTPS),
 		TLSConfig:    tlsConfig,
@@ -370,17 +297,17 @@ func (g *GubinNET) Start() {
 		WriteTimeout: g.config.RequestTimeout,
 	}
 
-	// HTTP/3 server configuration
+	// HTTP/3 server configuration (now on the same port as HTTPS)
 	h3Mux := http.NewServeMux()
 	h3Mux.Handle("/", httpsServer.Handler)
 	g.h3Server = &http3.Server{
-		Addr:      fmt.Sprintf(":%d", g.config.ListenHTTPS+1),
+		Addr:      fmt.Sprintf(":%d", g.config.ListenHTTPS), // Same port as HTTPS
 		TLSConfig: tlsConfig,
 		Handler:   h3Mux,
 	}
 
 	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{
-		Port: g.config.ListenHTTPS + 1,
+		Port: g.config.ListenHTTPS, // Same port as HTTPS
 	})
 	if err != nil {
 		g.logger.Error("Failed to create UDP listener for HTTP/3", map[string]interface{}{
@@ -390,7 +317,7 @@ func (g *GubinNET) Start() {
 		g.h3Listener = udpConn
 		go func() {
 			g.logger.Info("HTTP/3 server started", map[string]interface{}{
-				"port": g.config.ListenHTTPS + 1,
+				"port": g.config.ListenHTTPS, // Log the correct port
 			})
 			err := g.h3Server.Serve(g.h3Listener)
 			if err != nil && err != http.ErrServerClosed {
@@ -486,7 +413,6 @@ func (g *GubinNET) Start() {
 				g.logger.Info("Shutting down server", nil)
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
-
 				httpServer.Shutdown(ctx)
 				httpsServer.Shutdown(ctx)
 				if g.h3Server != nil {
@@ -499,7 +425,6 @@ func (g *GubinNET) Start() {
 					metricsServer.Shutdown(ctx)
 				}
 				healthServer.Shutdown(ctx)
-
 				for _, host := range g.config.VirtualHosts {
 					if host.AppProcess != nil {
 						g.logger.Info("Stopping app", map[string]interface{}{
@@ -659,35 +584,43 @@ func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+
 	// WebSocket handling
 	if r.URL.Path == "/ws" {
 		g.handleWebSocket(w, r)
 		return
 	}
+
 	w.Header().Del("Server")
 	w.Header().Set("Server", "GubinNET/1.4")
+
 	// Ограничение размера запроса
 	if g.config.MaxRequestSize > 0 {
 		r.Body = http.MaxBytesReader(w, r.Body, g.config.MaxRequestSize)
 	}
+
 	// Защита от path traversal
 	if strings.Contains(r.URL.Path, "../") {
 		g.serveErrorPage(w, r, http.StatusBadRequest, "Invalid URL path")
 		return
 	}
+
 	// Получение хоста из заголовков
 	hostHeader := strings.Split(r.Host, ":")[0]
 	host, exists := g.config.VirtualHosts[hostHeader]
 	if !exists {
-		g.serveErrorPage(w, r, http.StatusNotFound, "Host not found")
+		// Новый вызов функции для страницы "Host Not Found"
+		g.serveHostNotFoundPage(w, r)
 		return
 	}
+
 	// Redirect HTTP to HTTPS if SSL certificate is present
 	if r.TLS == nil && host.SSLCertificate != "" && host.SSLKey != "" {
 		redirectURL := fmt.Sprintf("https://%s%s", host.Domain, r.RequestURI)
 		http.Redirect(w, r, redirectURL, http.StatusPermanentRedirect)
 		return
 	}
+
 	// Rate limiting
 	if host.RateLimit > 0 {
 		ip := getRealIP(r)
@@ -705,6 +638,7 @@ func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
 		}
 		rateLimiterLock.Unlock()
 	}
+
 	// Basic Authentication
 	if len(host.BasicAuth) > 0 {
 		username, password, ok := r.BasicAuth()
@@ -714,6 +648,7 @@ func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+
 	// CORS Handling
 	if len(host.CORS.AllowedOrigins) > 0 {
 		origin := r.Header.Get("Origin")
@@ -734,6 +669,7 @@ func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+
 	// Rewrite rules with conditions
 	originalPath := r.URL.Path
 	query := r.URL.RawQuery
@@ -767,12 +703,14 @@ func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
+
 	// Если путь изменился после rewrite, выполнить новый запрос
 	if r.URL.Path != originalPath {
 		r.RequestURI = r.URL.RequestURI()
 		g.handleRequest(w, r)
 		return
 	}
+
 	// Proxy or serve application
 	if host.DefaultProxy != "" || (host.AppMode == "dotnet" && host.InternalPort != 0) || (host.AppMode == "nodejs" && g.config.NodeConfig.Enabled && g.config.NodeConfig.InternalPort != 0) {
 		var proxyUrl string
@@ -786,8 +724,55 @@ func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
 		g.proxyRequest(w, r, proxyUrl)
 		return
 	}
+
 	// Serve file or SPA
 	g.serveFileOrSpa(w, r, host)
+}
+
+func (g *GubinNET) serveHostNotFoundPage(w http.ResponseWriter, r *http.Request) {
+	g.logger.Info("Host not found page served", map[string]interface{}{
+		"path":       r.URL.Path,
+		"method":     r.Method,
+		"remote":     r.RemoteAddr,
+		"user_agent": r.UserAgent(),
+	})
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusNotFound)
+
+	html := `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Host Not Found</title>
+    <style>
+        body { font-family: Arial, sans-serif; text-align: center; margin: 50px; }
+        h1 { color: #d9534f; }
+        p { color: #555; }
+        .instructions { margin-top: 20px; font-size: 14px; line-height: 1.6; }
+        .instructions a { color: #007bff; text-decoration: none; }
+        .instructions a:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <h1>Host Not Found</h1>
+    <p>The requested host could not be found on this server.</p>
+    <div class="instructions">
+        <p>Please check the following:</p>
+        <ul style="text-align: left; display: inline-block;">
+            <li>Ensure that you are accessing the correct domain or subdomain.</li>
+            <li>Verify your DNS settings to ensure they point to the correct server.</li>
+            <li>Contact your system administrator if you believe this is an error.</li>
+        </ul>
+        <p>If you are the administrator, make sure the host is properly configured in the server's configuration file.</p>
+    </div>
+    <p>Server: GubinNET/1.4</p>
+</body>
+</html>
+`
+	w.Write([]byte(html))
 }
 
 // Проксирование запросов
@@ -969,7 +954,6 @@ func (g *GubinNET) serveErrorPage(w http.ResponseWriter, r *http.Request, status
 		"remote":     r.RemoteAddr,
 		"user_agent": r.UserAgent(),
 	})
-
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(statusCode)
 	html := fmt.Sprintf(`
@@ -1038,7 +1022,7 @@ func main() {
 		fmt.Println("Failed to initialize logger")
 		os.Exit(1)
 	}
-	config := &ConfigParser{
+	config := &ConfigParser{ // Ensure this is *ConfigParser
 		logger:         logger,
 		MaxRequestSize: 10 << 20, // 10MB default
 		RequestTimeout: 30 * time.Second,
@@ -1065,7 +1049,8 @@ func main() {
 		}
 	}
 
-	err := config.Load(configPath)
+	// Загрузка конфигурации
+	err := config.Load(configPath) // Ensure this matches *ConfigParser
 	if err != nil {
 		logger.Error("Failed to load config", map[string]interface{}{
 			"error": err,
