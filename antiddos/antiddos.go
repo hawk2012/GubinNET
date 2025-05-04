@@ -98,3 +98,23 @@ func getRealIP(r *http.Request) string {
 	}
 	return ip
 }
+
+// Добавление IP в чёрный список
+func AddToBlacklist(ip string) {
+	// Создаем экземпляр AntiDDoS (если он ещё не создан)
+	defaultConfig := &AntiDDoSConfig{
+		MaxRequestsPerSecond: 100,              // Примерное значение
+		BlockDuration:        60 * time.Second, // 1 минута блокировки
+	}
+	defaultLogger := logger.NewLogger("/etc/gubinnet/logs") // Путь к логам
+	antiDDoS := NewAntiDDoS(defaultConfig, defaultLogger)
+
+	antiDDoS.mu.Lock()
+	defer antiDDoS.mu.Unlock()
+
+	antiDDoS.blockList[ip] = time.Now()
+	antiDDoS.logger.Log(logger.WarningLevel, "Manually added IP to blacklist", map[string]interface{}{
+		"ip":     ip,
+		"reason": "manual block",
+	})
+}

@@ -127,24 +127,19 @@ func (c *ConfigParser) Load(configPath string) error {
 		return fmt.Errorf("failed to open config file: %w", err)
 	}
 	defer file.Close()
-
 	scanner := bufio.NewScanner(file)
 	c.VirtualHosts = make(map[string]*VirtualHost)
-
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
-			continue // Пропускаем пустые строки и комментарии
+			continue
 		}
-
 		parts := strings.SplitN(line, "=", 2)
 		if len(parts) != 2 {
-			continue // Пропускаем некорректные строки
+			continue
 		}
-
 		key := strings.TrimSpace(parts[0])
 		value := strings.TrimSpace(parts[1])
-
 		switch key {
 		case "ListenHTTP":
 			port, err := strconv.Atoi(value)
@@ -169,7 +164,6 @@ func (c *ConfigParser) Load(configPath string) error {
 		case "EnableGzip":
 			c.EnableGzip = value == "true"
 		default:
-			// Обработка виртуальных хостов
 			if strings.HasPrefix(key, "VirtualHost.") {
 				hostParts := strings.SplitN(key, ".", 3)
 				if len(hostParts) != 3 {
@@ -177,13 +171,11 @@ func (c *ConfigParser) Load(configPath string) error {
 				}
 				domain := hostParts[1]
 				field := hostParts[2]
-
 				host, exists := c.VirtualHosts[domain]
 				if !exists {
 					host = &VirtualHost{Domain: domain}
 					c.VirtualHosts[domain] = host
 				}
-
 				switch field {
 				case "BasePath":
 					host.BasePath = value
@@ -215,12 +207,44 @@ func (c *ConfigParser) Load(configPath string) error {
 			}
 		}
 	}
-
 	if err := scanner.Err(); err != nil {
 		return fmt.Errorf("error reading config file: %w", err)
 	}
-
 	return nil
+}
+
+// Middleware для защиты от подозрительных запросов
+func (g *GubinNET) securityMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		path := strings.ToLower(r.URL.Path)
+
+		// Паттерны для блокировки
+		blockedPatterns := []string{
+			".env",
+			"/wordpress/wp-admin/setup-config.php",
+		}
+
+		for _, pattern := range blockedPatterns {
+			if strings.Contains(path, pattern) {
+				ip := getRealIP(r)
+
+				// Логируем попытку
+				g.logger.Warn("Blocked suspicious request", map[string]interface{}{
+					"path": path,
+					"ip":   ip,
+				})
+
+				// Добавляем IP в черный список (blackhole)
+				antiddos.AddToBlacklist(ip)
+
+				// Возвращаем ошибку
+				g.serveErrorPage(w, r, http.StatusForbidden, "Access Denied")
+				return
+			}
+		}
+
+		next(w, r)
+	}
 }
 
 // Запуск сервера
@@ -263,7 +287,7 @@ func (g *GubinNET) Start() {
 	// HTTP/1.1 server
 	httpServer := &http.Server{
 		Addr:         fmt.Sprintf(":%d", g.config.ListenHTTP),
-		Handler:      g.recoveryMiddleware(g.loggingMiddleware(g.metricsMiddleware(antiDDoS.Middleware(g.handleRequest)))),
+		Handler:      g.recoveryMiddleware(g.securityMiddleware(g.loggingMiddleware(g.metricsMiddleware(antiDDoS.Middleware(g.handleRequest))))),
 		ReadTimeout:  g.config.RequestTimeout,
 		WriteTimeout: g.config.RequestTimeout,
 	}
@@ -286,28 +310,28 @@ func (g *GubinNET) Start() {
 			}
 			return &cert, nil
 		},
-		NextProtos: []string{"h3", "h2", "http/1.1"}, // Updated ALPN protocols
+		NextProtos: []string{"h3", "h2", "http/1.1"},
 	}
 
 	httpsServer := &http.Server{
 		Addr:         fmt.Sprintf(":%d", g.config.ListenHTTPS),
 		TLSConfig:    tlsConfig,
-		Handler:      g.recoveryMiddleware(g.loggingMiddleware(g.metricsMiddleware(g.handleRequest))),
+		Handler:      g.recoveryMiddleware(g.securityMiddleware(g.loggingMiddleware(g.metricsMiddleware(g.handleRequest)))),
 		ReadTimeout:  g.config.RequestTimeout,
 		WriteTimeout: g.config.RequestTimeout,
 	}
 
-	// HTTP/3 server configuration (now on the same port as HTTPS)
+	// HTTP/3 server configuration
 	h3Mux := http.NewServeMux()
 	h3Mux.Handle("/", httpsServer.Handler)
 	g.h3Server = &http3.Server{
-		Addr:      fmt.Sprintf(":%d", g.config.ListenHTTPS), // Same port as HTTPS
+		Addr:      fmt.Sprintf(":%d", g.config.ListenHTTPS),
 		TLSConfig: tlsConfig,
 		Handler:   h3Mux,
 	}
 
 	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{
-		Port: g.config.ListenHTTPS, // Same port as HTTPS
+		Port: g.config.ListenHTTPS,
 	})
 	if err != nil {
 		g.logger.Error("Failed to create UDP listener for HTTP/3", map[string]interface{}{
@@ -317,7 +341,7 @@ func (g *GubinNET) Start() {
 		g.h3Listener = udpConn
 		go func() {
 			g.logger.Info("HTTP/3 server started", map[string]interface{}{
-				"port": g.config.ListenHTTPS, // Log the correct port
+				"port": g.config.ListenHTTPS,
 			})
 			err := g.h3Server.Serve(g.h3Listener)
 			if err != nil && err != http.ErrServerClosed {
@@ -594,11 +618,6 @@ func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
 	w.Header().Del("Server")
 	w.Header().Set("Server", "GubinNET/1.4")
 
-	// Ограничение размера запроса
-	if g.config.MaxRequestSize > 0 {
-		r.Body = http.MaxBytesReader(w, r.Body, g.config.MaxRequestSize)
-	}
-
 	// Защита от path traversal
 	if strings.Contains(r.URL.Path, "../") {
 		g.serveErrorPage(w, r, http.StatusBadRequest, "Invalid URL path")
@@ -609,7 +628,6 @@ func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
 	hostHeader := strings.Split(r.Host, ":")[0]
 	host, exists := g.config.VirtualHosts[hostHeader]
 	if !exists {
-		// Новый вызов функции для страницы "Host Not Found"
 		g.serveHostNotFoundPage(w, r)
 		return
 	}
@@ -675,14 +693,12 @@ func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.RawQuery
 	for pattern, target := range host.RewriteRules {
 		if matched, _ := filepath.Match(pattern, r.URL.Path); matched {
-			// Check for conditions in the rewrite rule
 			parts := strings.Split(target, " ")
 			if len(parts) > 1 {
 				condition := parts[0]
 				targetPath := parts[1]
 				switch condition {
 				case "if":
-					// Example: "if -f /path/to/file"
 					if len(parts) >= 4 && parts[2] == "-f" {
 						filePath := parts[3]
 						if _, err := os.Stat(filePath); err == nil {
@@ -696,7 +712,6 @@ func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
 			} else {
 				r.URL.Path = target
 			}
-			// Append query string if it exists
 			if query != "" {
 				r.URL.RawQuery = query
 			}
@@ -736,10 +751,8 @@ func (g *GubinNET) serveHostNotFoundPage(w http.ResponseWriter, r *http.Request)
 		"remote":     r.RemoteAddr,
 		"user_agent": r.UserAgent(),
 	})
-
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusNotFound)
-
 	html := `
 <!DOCTYPE html>
 <html lang="en">
@@ -1022,7 +1035,7 @@ func main() {
 		fmt.Println("Failed to initialize logger")
 		os.Exit(1)
 	}
-	config := &ConfigParser{ // Ensure this is *ConfigParser
+	config := &ConfigParser{
 		logger:         logger,
 		MaxRequestSize: 10 << 20, // 10MB default
 		RequestTimeout: 30 * time.Second,
@@ -1033,7 +1046,6 @@ func main() {
 	// Определение пути к конфигурационному файлу
 	configPath := os.Getenv("GUBINNET_CONFIG")
 	if configPath == "" {
-		// Для Windows ищем файл рядом с исполняемым файлом
 		if os.PathSeparator == '\\' {
 			exePath, err := os.Executable()
 			if err != nil {
@@ -1044,13 +1056,12 @@ func main() {
 			}
 			configPath = filepath.Join(filepath.Dir(exePath), "config.ini")
 		} else {
-			// Для других систем используем прежний путь
 			configPath = "/etc/gubinnet/config.ini"
 		}
 	}
 
 	// Загрузка конфигурации
-	err := config.Load(configPath) // Ensure this matches *ConfigParser
+	err := config.Load(configPath)
 	if err != nil {
 		logger.Error("Failed to load config", map[string]interface{}{
 			"error": err,

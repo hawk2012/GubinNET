@@ -78,6 +78,10 @@ func (l *Logger) Warning(message string, fields map[string]interface{}) {
 	l.Log(WarningLevel, message, fields)
 }
 
+func (l *Logger) Warn(message string, fields map[string]interface{}) {
+	l.Warning(message, fields)
+}
+
 func (l *Logger) Error(message string, fields map[string]interface{}) {
 	l.Log(ErrorLevel, message, fields)
 }
