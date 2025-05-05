@@ -1,20 +1,13 @@
 package main
 
 import (
-	"GubinNET/antiddos"
-	"GubinNET/logger"
-	"bufio"
 	"compress/gzip"
-	"context"
 	"crypto/tls"
+	"database/sql"
 	"fmt"
 	"io"
-	"log"
-	"net"
 	"net/http"
-	"net/http/cookiejar"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -23,11 +16,13 @@ import (
 	"syscall"
 	"time"
 
+	"GubinNET/antiddos"
+	"GubinNET/logger"
+
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/gorilla/websocket"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/quic-go/quic-go/http3"
 )
 
 // Метрики Prometheus
@@ -49,68 +44,30 @@ var (
 
 // Конфигурация
 type ConfigParser struct {
-	ListenHTTP     int
-	ListenHTTPS    int
-	ConfigPath     string
-	VirtualHosts   map[string]*VirtualHost
-	PHPConfig      *PHPSettings
-	NodeConfig     *NodeSettings
-	MaxRequestSize int64
-	RequestTimeout time.Duration
-	EnableMetrics  bool
-	EnableGzip     bool
-	TrustedProxies []string
-	logger         *logger.Logger
-	AntiDDoSConfig *antiddos.AntiDDoSConfig
+	DB *sql.DB
 }
 
 type VirtualHost struct {
-	Domain         string
-	BasePath       string
-	WebRootPath    string
-	DefaultProxy   string
-	InternalPort   int
-	SSLCertificate string
-	SSLKey         string
-	AppMode        string
-	DllPath        string
-	AppProcess     *os.Process
-	SPAFallback    string
-	AppType        string // НОВОЕ ПОЛЕ
-	BasicAuth      map[string]string
-	CORS           CORSSettings
-	RateLimit      int
-	RewriteRules   map[string]string
-}
-
-type CORSSettings struct {
-	AllowedOrigins []string
-	AllowedMethods []string
-	AllowedHeaders []string
-}
-
-type PHPSettings struct {
-	Enabled     bool
-	BinaryPath  string
-	WebRootPath string
-}
-
-type NodeSettings struct {
-	Enabled      bool
-	ScriptPath   string
-	InternalPort int
+	ServerName      string
+	ListenPort      int
+	Root            string
+	Index           string
+	TryFiles        []string
+	UseSSL          bool
+	CertPath        string
+	KeyPath         string
+	RedirectToHTTPS bool
 }
 
 // Основная структура сервера
 type GubinNET struct {
-	config     *ConfigParser
-	logger     *logger.Logger
-	cache      map[string]*cacheEntry
-	mu         sync.Mutex
-	cookieJar  http.CookieJar
-	upgrader   websocket.Upgrader
-	h3Server   *http3.Server
-	h3Listener net.PacketConn
+	config             *ConfigParser
+	logger             *logger.Logger
+	cache              map[string]*cacheEntry
+	mu                 sync.Mutex
+	upgrader           websocket.Upgrader
+	antiDDoS           *antiddos.AntiDDoS
+	dbConnectionString string
 }
 
 type cacheEntry struct {
@@ -120,129 +77,32 @@ type cacheEntry struct {
 	contentType string
 }
 
-// Загрузка конфигурации
-func (c *ConfigParser) Load(configPath string) error {
-	file, err := os.Open(configPath)
+// Загрузка конфигурации из MySQL
+func (c *ConfigParser) Load(dbConnectionString string) error {
+	var err error
+	c.DB, err = sql.Open("mysql", dbConnectionString)
 	if err != nil {
-		return fmt.Errorf("failed to open config file: %w", err)
+		return fmt.Errorf("failed to connect to database: %w", err)
 	}
-	defer file.Close()
-	scanner := bufio.NewScanner(file)
-	c.VirtualHosts = make(map[string]*VirtualHost)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		parts := strings.SplitN(line, "=", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		key := strings.TrimSpace(parts[0])
-		value := strings.TrimSpace(parts[1])
-		switch key {
-		case "ListenHTTP":
-			port, err := strconv.Atoi(value)
-			if err != nil {
-				return fmt.Errorf("invalid ListenHTTP value: %w", err)
-			}
-			c.ListenHTTP = port
-		case "ListenHTTPS":
-			port, err := strconv.Atoi(value)
-			if err != nil {
-				return fmt.Errorf("invalid ListenHTTPS value: %w", err)
-			}
-			c.ListenHTTPS = port
-		case "MaxRequestSize":
-			size, err := strconv.ParseInt(value, 10, 64)
-			if err != nil {
-				return fmt.Errorf("invalid MaxRequestSize value: %w", err)
-			}
-			c.MaxRequestSize = size
-		case "EnableMetrics":
-			c.EnableMetrics = value == "true"
-		case "EnableGzip":
-			c.EnableGzip = value == "true"
-		default:
-			if strings.HasPrefix(key, "VirtualHost.") {
-				hostParts := strings.SplitN(key, ".", 3)
-				if len(hostParts) != 3 {
-					continue
-				}
-				domain := hostParts[1]
-				field := hostParts[2]
-				host, exists := c.VirtualHosts[domain]
-				if !exists {
-					host = &VirtualHost{Domain: domain}
-					c.VirtualHosts[domain] = host
-				}
-				switch field {
-				case "BasePath":
-					host.BasePath = value
-				case "WebRootPath":
-					host.WebRootPath = value
-				case "DefaultProxy":
-					host.DefaultProxy = value
-				case "InternalPort":
-					port, err := strconv.Atoi(value)
-					if err == nil {
-						host.InternalPort = port
-					}
-				case "SSLCertificate":
-					host.SSLCertificate = value
-				case "SSLKey":
-					host.SSLKey = value
-				case "AppMode":
-					host.AppMode = value
-				case "DllPath":
-					host.DllPath = value
-				case "SPAFallback":
-					host.SPAFallback = value
-				case "RateLimit":
-					rate, err := strconv.Atoi(value)
-					if err == nil {
-						host.RateLimit = rate
-					}
-				}
-			}
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("error reading config file: %w", err)
-	}
-	return nil
+	return c.DB.Ping()
 }
 
 // Middleware для защиты от подозрительных запросов
 func (g *GubinNET) securityMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		path := strings.ToLower(r.URL.Path)
-
-		// Паттерны для блокировки
-		blockedPatterns := []string{
-			".env",
-			"/wordpress/wp-admin/setup-config.php",
-		}
-
+		blockedPatterns := []string{".env", "/shell", "/wordpress/wp-admin/setup-config.php"}
 		for _, pattern := range blockedPatterns {
 			if strings.Contains(path, pattern) {
 				ip := getRealIP(r)
-
-				// Логируем попытку
 				g.logger.Warn("Blocked suspicious request", map[string]interface{}{
 					"path": path,
 					"ip":   ip,
 				})
-
-				// Добавляем IP в черный список (blackhole)
-				antiddos.AddToBlacklist(ip)
-
-				// Возвращаем ошибку
 				g.serveErrorPage(w, r, http.StatusForbidden, "Access Denied")
 				return
 			}
 		}
-
 		next(w, r)
 	}
 }
@@ -251,551 +111,160 @@ func (g *GubinNET) securityMiddleware(next http.HandlerFunc) http.HandlerFunc {
 func (g *GubinNET) Start() {
 	g.logger.Info("Starting server", nil)
 	g.cache = make(map[string]*cacheEntry)
-	antiDDoS := antiddos.NewAntiDDoS(g.config.AntiDDoSConfig, g.logger)
-	jar, err := cookiejar.New(nil)
-	if err != nil {
-		g.logger.Error("Failed to initialize cookie jar", map[string]interface{}{"error": err})
-	} else {
-		g.cookieJar = jar
-	}
 
-	// Запуск приложений для каждого хоста
-	for _, host := range g.config.VirtualHosts {
-		if host.AppMode == "dotnet" && host.DllPath != "" && host.InternalPort != 0 {
-			go func(h *VirtualHost) {
-				err := g.startDotNetApp(h)
-				if err != nil {
-					g.logger.Error("Failed to start .NET app", map[string]interface{}{
-						"host":  h.Domain,
-						"error": err,
-					})
-				}
-			}(host)
-		} else if host.AppMode == "nodejs" && g.config.NodeConfig.Enabled && g.config.NodeConfig.ScriptPath != "" && g.config.NodeConfig.InternalPort != 0 {
-			go func(h *VirtualHost) {
-				err := g.startNodeApp(h)
-				if err != nil {
-					g.logger.Error("Failed to start Node.js app", map[string]interface{}{
-						"host":  h.Domain,
-						"error": err,
-					})
-				}
-			}(host)
-		}
-	}
-
-	// HTTP/1.1 server
-	httpServer := &http.Server{
-		Addr:         fmt.Sprintf(":%d", g.config.ListenHTTP),
-		Handler:      g.recoveryMiddleware(g.securityMiddleware(g.loggingMiddleware(g.metricsMiddleware(antiDDoS.Middleware(g.handleRequest))))),
-		ReadTimeout:  g.config.RequestTimeout,
-		WriteTimeout: g.config.RequestTimeout,
-	}
-
-	// HTTPS server with HTTP/2 and HTTP/3 support
-	tlsConfig := &tls.Config{
-		MinVersion: tls.VersionTLS12,
-		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-			host, exists := g.config.VirtualHosts[hello.ServerName]
-			if !exists || host.SSLCertificate == "" || host.SSLKey == "" {
-				return nil, fmt.Errorf("certificate not found for host: %s", hello.ServerName)
-			}
-			cert, err := tls.LoadX509KeyPair(host.SSLCertificate, host.SSLKey)
-			if err != nil {
-				g.logger.Error("Failed to load certificate", map[string]interface{}{
-					"host":  hello.ServerName,
-					"error": err,
-				})
-				return nil, err
-			}
-			return &cert, nil
-		},
-		NextProtos: []string{"h3", "h2", "http/1.1"},
-	}
-
-	httpsServer := &http.Server{
-		Addr:         fmt.Sprintf(":%d", g.config.ListenHTTPS),
-		TLSConfig:    tlsConfig,
-		Handler:      g.recoveryMiddleware(g.securityMiddleware(g.loggingMiddleware(g.metricsMiddleware(g.handleRequest)))),
-		ReadTimeout:  g.config.RequestTimeout,
-		WriteTimeout: g.config.RequestTimeout,
-	}
-
-	// HTTP/3 server configuration
-	h3Mux := http.NewServeMux()
-	h3Mux.Handle("/", httpsServer.Handler)
-	g.h3Server = &http3.Server{
-		Addr:      fmt.Sprintf(":%d", g.config.ListenHTTPS),
-		TLSConfig: tlsConfig,
-		Handler:   h3Mux,
-	}
-
-	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{
-		Port: g.config.ListenHTTPS,
-	})
-	if err != nil {
-		g.logger.Error("Failed to create UDP listener for HTTP/3", map[string]interface{}{
-			"error": err,
-		})
-	} else {
-		g.h3Listener = udpConn
-		go func() {
-			g.logger.Info("HTTP/3 server started", map[string]interface{}{
-				"port": g.config.ListenHTTPS,
-			})
-			err := g.h3Server.Serve(g.h3Listener)
-			if err != nil && err != http.ErrServerClosed {
-				g.logger.Error("HTTP/3 server error", map[string]interface{}{
-					"error": err,
-				})
-			}
-		}()
-	}
-
-	// Start servers in goroutines
-	go func() {
-		g.logger.Info("HTTP server started", map[string]interface{}{
-			"port": g.config.ListenHTTP,
-		})
-		err := httpServer.ListenAndServe()
-		if err != nil && err != http.ErrServerClosed {
-			g.logger.Error("HTTP server error", map[string]interface{}{
-				"error": err,
-			})
-		}
-	}()
-
-	go func() {
-		g.logger.Info("HTTPS server started", map[string]interface{}{
-			"port": g.config.ListenHTTPS,
-		})
-		err := httpsServer.ListenAndServeTLS("", "")
-		if err != nil && err != http.ErrServerClosed {
-			g.logger.Error("HTTPS server error", map[string]interface{}{
-				"error": err,
-			})
-		}
-	}()
-
-	var metricsServer *http.Server
-	if g.config.EnableMetrics {
-		go func() {
-			metricsMux := http.NewServeMux()
-			metricsMux.Handle("/metrics", promhttp.Handler())
-			metricsServer = &http.Server{
-				Addr:    ":9090",
-				Handler: metricsMux,
-			}
-			g.logger.Info("Metrics server started", map[string]interface{}{
-				"port": 9090,
-			})
-			err := metricsServer.ListenAndServe()
-			if err != nil && err != http.ErrServerClosed {
-				g.logger.Error("Metrics server error", map[string]interface{}{
-					"error": err,
-				})
-			}
-		}()
-	}
-
-	var healthServer *http.Server
-	go func() {
-		healthMux := http.NewServeMux()
-		healthMux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			w.Write([]byte("OK"))
-		})
-		healthServer = &http.Server{
-			Addr:    ":8081",
-			Handler: healthMux,
-		}
-		g.logger.Info("Health server started", map[string]interface{}{
-			"port": 8081,
-		})
-		err := healthServer.ListenAndServe()
-		if err != nil && err != http.ErrServerClosed {
-			g.logger.Error("Health server error", map[string]interface{}{
-				"error": err,
-			})
-		}
-	}()
-
+	// Канал для сигналов операционной системы
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+
+	// Запуск HTTP-сервера
+	go func() {
+		httpServer := &http.Server{
+			Addr:         ":80",
+			Handler:      g.setupMiddleware(http.HandlerFunc(g.handleRequest)),
+			ReadTimeout:  30 * time.Second,
+			WriteTimeout: 30 * time.Second,
+		}
+		g.logger.Info("HTTP server started on port 80", nil)
+		err := httpServer.ListenAndServe()
+		if err != nil && err != http.ErrServerClosed {
+			g.logger.Error("HTTP server error", map[string]interface{}{"error": err})
+		}
+	}()
+
+	// Запуск HTTPS-сервера с поддержкой SNI
+	go func() {
+		// Создаем мапу для хранения сертификатов
+		certMap := make(map[string]tls.Certificate)
+
+		// Загружаем сертификаты из базы данных
+		rows, err := g.config.DB.Query("SELECT server_name, cert_path, key_path FROM virtual_hosts WHERE use_ssl = TRUE")
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var serverName, certPath, keyPath string
+				err := rows.Scan(&serverName, &certPath, &keyPath)
+				if err != nil {
+					g.logger.Error("Failed to load SSL certificate", map[string]interface{}{
+						"server_name": serverName,
+						"error":       err,
+					})
+					continue
+				}
+
+				// Загружаем сертификат
+				cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+				if err != nil {
+					g.logger.Error("Failed to load SSL certificate", map[string]interface{}{
+						"server_name": serverName,
+						"error":       err,
+					})
+					continue
+				}
+				certMap[serverName] = cert
+			}
+		} else {
+			g.logger.Error("Failed to query SSL certificates", map[string]interface{}{"error": err})
+		}
+
+		// Функция для получения сертификата по имени хоста
+		getCertificate := func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			if cert, ok := certMap[hello.ServerName]; ok {
+				return &cert, nil
+			}
+			g.logger.Warn("No certificate found for host", map[string]interface{}{
+				"host": hello.ServerName,
+			})
+			return nil, fmt.Errorf("no certificate found for host: %s", hello.ServerName)
+		}
+
+		// Настройка TLS-конфигурации
+		tlsConfig := &tls.Config{
+			GetCertificate: getCertificate,
+		}
+
+		httpsServer := &http.Server{
+			Addr:         ":443",
+			Handler:      g.setupMiddleware(http.HandlerFunc(g.handleRequest)),
+			TLSConfig:    tlsConfig,
+			ReadTimeout:  30 * time.Second,
+			WriteTimeout: 30 * time.Second,
+		}
+
+		g.logger.Info("HTTPS server started on port 443", nil)
+		err = httpsServer.ListenAndServeTLS("", "") // Пустые строки, так как сертификаты загружаются через GetCertificate
+		if err != nil && err != http.ErrServerClosed {
+			g.logger.Error("HTTPS server error", map[string]interface{}{"error": err})
+		}
+	}()
+
+	// Обработка сигналов
 	go func() {
 		for sig := range sigChan {
 			switch sig {
 			case syscall.SIGHUP:
 				g.logger.Info("Reloading configuration", nil)
-				err := g.config.Load(g.config.ConfigPath)
+				err := g.config.Load(g.dbConnectionString)
 				if err != nil {
-					g.logger.Error("Failed to reload config", map[string]interface{}{
-						"error": err,
-					})
+					g.logger.Error("Failed to reload config", map[string]interface{}{"error": err})
+				} else {
+					g.logger.Info("Configuration reloaded successfully", nil)
 				}
 			case os.Interrupt, syscall.SIGTERM:
 				g.logger.Info("Shutting down server", nil)
-				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-				defer cancel()
-				httpServer.Shutdown(ctx)
-				httpsServer.Shutdown(ctx)
-				if g.h3Server != nil {
-					g.h3Server.Close()
-				}
-				if g.h3Listener != nil {
-					g.h3Listener.Close()
-				}
-				if g.config.EnableMetrics {
-					metricsServer.Shutdown(ctx)
-				}
-				healthServer.Shutdown(ctx)
-				for _, host := range g.config.VirtualHosts {
-					if host.AppProcess != nil {
-						g.logger.Info("Stopping app", map[string]interface{}{
-							"host": host.Domain,
-							"pid":  host.AppProcess.Pid,
-						})
-						host.AppProcess.Signal(syscall.SIGTERM)
-					}
-				}
-				g.logger.Info("Server gracefully stopped", nil)
-				return
+				os.Exit(0)
 			}
 		}
 	}()
-}
 
-// Middleware для обработки ошибок
-func (g *GubinNET) recoveryMiddleware(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		defer func() {
-			if err := recover(); err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				g.logger.Error("Recovered from panic", map[string]interface{}{
-					"error": err,
-					"path":  r.URL.Path,
-				})
-			}
-		}()
-		next(w, r)
-	}
-}
-
-// Middleware для логирования
-func (g *GubinNET) loggingMiddleware(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-		requestID := r.Header.Get("X-Request-ID")
-		if requestID == "" {
-			requestID = fmt.Sprintf("%d", time.Now().UnixNano())
-		}
-		g.logger.Info("Request started", map[string]interface{}{
-			"request_id": requestID,
-			"method":     r.Method,
-			"path":       r.URL.Path,
-			"remote":     r.RemoteAddr,
-			"user_agent": r.UserAgent(),
-		})
-		w.Header().Set("X-Request-ID", requestID)
-		ww := &responseWriterWrapper{w: w}
-		next(ww, r)
-		g.logger.Info("Request completed", map[string]interface{}{
-			"request_id":  requestID,
-			"method":      r.Method,
-			"path":        r.URL.Path,
-			"status":      ww.status,
-			"duration_ms": time.Since(start).Milliseconds(),
-		})
-	}
-}
-
-// Middleware для метрик
-func (g *GubinNET) metricsMiddleware(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-		activeConnections.Inc()
-		defer activeConnections.Dec()
-		ww := &responseWriterWrapper{w: w}
-		next(ww, r)
-		duration := time.Since(start).Seconds()
-		requestDuration.WithLabelValues(r.Method, r.URL.Path).Observe(duration)
-		requestsTotal.WithLabelValues(r.Method, r.URL.Path, strconv.Itoa(ww.status)).Inc()
-	}
-}
-
-// Обертка для записи ответа
-type responseWriterWrapper struct {
-	w      http.ResponseWriter
-	status int
-}
-
-func (w *responseWriterWrapper) Header() http.Header {
-	return w.w.Header()
-}
-
-func (w *responseWriterWrapper) Write(b []byte) (int, error) {
-	if w.status == 0 {
-		w.status = http.StatusOK
-	}
-	return w.w.Write(b)
-}
-
-func (w *responseWriterWrapper) WriteHeader(statusCode int) {
-	w.status = statusCode
-	w.w.WriteHeader(statusCode)
-}
-
-// Запуск .NET приложения
-func (g *GubinNET) startDotNetApp(host *VirtualHost) error {
-	cmd := exec.Command("dotnet", host.DllPath)
-	cmd.Dir = filepath.Dir(host.DllPath)
-	cmd.Env = append(os.Environ(),
-		fmt.Sprintf("ASPNETCORE_URLS=http://0.0.0.0:%d", host.InternalPort),
-		"ASPNETCORE_ENVIRONMENT=Production",
-		"DOTNET_PRINT_TELEMETRY_MESSAGE=false",
-		"ASPNETCORE_SERVER_HEADER=",
-	)
-	err := cmd.Start()
-	if err != nil {
-		return err
-	}
-	host.AppProcess = cmd.Process
-	g.logger.Info("Started .NET app", map[string]interface{}{
-		"host": host.Domain,
-		"pid":  cmd.Process.Pid,
-	})
-	return nil
-}
-
-// Запуск Node.js приложения
-func (g *GubinNET) startNodeApp(host *VirtualHost) error {
-	cmd := exec.Command("node", g.config.NodeConfig.ScriptPath)
-	cmd.Dir = filepath.Dir(g.config.NodeConfig.ScriptPath)
-	cmd.Env = append(os.Environ(),
-		fmt.Sprintf("PORT=%d", g.config.NodeConfig.InternalPort),
-		"NODE_ENV=production",
-	)
-	err := cmd.Start()
-	if err != nil {
-		return err
-	}
-	host.AppProcess = cmd.Process
-	g.logger.Info("Started Node.js app", map[string]interface{}{
-		"host": host.Domain,
-		"pid":  cmd.Process.Pid,
-	})
-	return nil
-}
-
-// Интерфейс для плагинов
-type Plugin interface {
-	Name() string
-	Execute(w http.ResponseWriter, r *http.Request) bool
-}
-
-var registeredPlugins []Plugin
-
-// Экспортируемая функция для регистрации плагинов
-func RegisterPlugin(p Plugin) {
-	registeredPlugins = append(registeredPlugins, p)
+	// Блокировка основного потока
+	select {}
 }
 
 // Обработка запросов
 func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
-	// Проверка плагинов
-	for _, plugin := range registeredPlugins {
-		if plugin.Execute(w, r) {
-			return
+	hostHeader := strings.Split(strings.TrimSuffix(r.Host, ";"), ":")[0]
+
+	// Поиск виртуального хоста по заголовку Host
+	var host *VirtualHost
+	rows, err := g.config.DB.Query("SELECT server_name, listen_port, root_path, index_file, try_files, use_ssl, cert_path, key_path, redirect_to_https FROM virtual_hosts WHERE server_name = ?", hostHeader)
+	if err != nil {
+		g.logger.Error("Database query error", map[string]interface{}{"error": err})
+		g.serveHostNotFoundPage(w, r)
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var tryFilesStr string
+		host = &VirtualHost{}
+		err := rows.Scan(&host.ServerName, &host.ListenPort, &host.Root, &host.Index, &tryFilesStr, &host.UseSSL, &host.CertPath, &host.KeyPath, &host.RedirectToHTTPS)
+		if err != nil {
+			g.logger.Error("Database scan error", map[string]interface{}{"error": err})
+			continue
 		}
+		host.TryFiles = strings.Split(tryFilesStr, ",")
+		break
 	}
 
-	// WebSocket handling
-	if r.URL.Path == "/ws" {
-		g.handleWebSocket(w, r)
-		return
-	}
-
-	w.Header().Del("Server")
-	w.Header().Set("Server", "GubinNET/1.4")
-
-	// Защита от path traversal
-	if strings.Contains(r.URL.Path, "../") {
-		g.serveErrorPage(w, r, http.StatusBadRequest, "Invalid URL path")
-		return
-	}
-
-	// Получение хоста из заголовков
-	hostHeader := strings.Split(r.Host, ":")[0]
-	host, exists := g.config.VirtualHosts[hostHeader]
-	if !exists {
+	if host == nil {
 		g.serveHostNotFoundPage(w, r)
 		return
 	}
 
-	// Redirect HTTP to HTTPS if SSL certificate is present
-	if r.TLS == nil && host.SSLCertificate != "" && host.SSLKey != "" {
-		redirectURL := fmt.Sprintf("https://%s%s", host.Domain, r.RequestURI)
-		http.Redirect(w, r, redirectURL, http.StatusPermanentRedirect)
+	// Редирект на HTTPS
+	if host.RedirectToHTTPS && r.TLS == nil {
+		url := "https://" + hostHeader + r.URL.String()
+		http.Redirect(w, r, url, http.StatusPermanentRedirect)
 		return
 	}
 
-	// Rate limiting
-	if host.RateLimit > 0 {
-		ip := getRealIP(r)
-		clientKey := ip + ":" + host.Domain
-		rateLimiterLock.Lock()
-		if _, exists := rateLimiter[clientKey]; !exists {
-			rateLimiter[clientKey] = time.Now()
-		} else {
-			if time.Since(rateLimiter[clientKey]) < time.Second/time.Duration(host.RateLimit) {
-				g.serveErrorPage(w, r, http.StatusTooManyRequests, "Rate limit exceeded")
-				rateLimiterLock.Unlock()
-				return
-			}
-			rateLimiter[clientKey] = time.Now()
-		}
-		rateLimiterLock.Unlock()
-	}
-
-	// Basic Authentication
-	if len(host.BasicAuth) > 0 {
-		username, password, ok := r.BasicAuth()
-		if !ok || host.BasicAuth[username] != password {
-			w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`)
-			g.serveErrorPage(w, r, http.StatusUnauthorized, "Unauthorized")
-			return
-		}
-	}
-
-	// CORS Handling
-	if len(host.CORS.AllowedOrigins) > 0 {
-		origin := r.Header.Get("Origin")
-		if origin != "" {
-			for _, allowed := range host.CORS.AllowedOrigins {
-				if allowed == "*" || allowed == origin {
-					w.Header().Set("Access-Control-Allow-Origin", origin)
-					if r.Method == "OPTIONS" {
-						w.Header().Set("Access-Control-Allow-Methods", strings.Join(host.CORS.AllowedMethods, ","))
-						if len(host.CORS.AllowedHeaders) > 0 {
-							w.Header().Set("Access-Control-Allow-Headers", strings.Join(host.CORS.AllowedHeaders, ","))
-						}
-						w.WriteHeader(http.StatusNoContent)
-						return
-					}
-					break
-				}
-			}
-		}
-	}
-
-	// Rewrite rules with conditions
-	originalPath := r.URL.Path
-	query := r.URL.RawQuery
-	for pattern, target := range host.RewriteRules {
-		if matched, _ := filepath.Match(pattern, r.URL.Path); matched {
-			parts := strings.Split(target, " ")
-			if len(parts) > 1 {
-				condition := parts[0]
-				targetPath := parts[1]
-				switch condition {
-				case "if":
-					if len(parts) >= 4 && parts[2] == "-f" {
-						filePath := parts[3]
-						if _, err := os.Stat(filePath); err == nil {
-							r.URL.Path = targetPath
-							break
-						}
-					}
-				default:
-					r.URL.Path = targetPath
-				}
-			} else {
-				r.URL.Path = target
-			}
-			if query != "" {
-				r.URL.RawQuery = query
-			}
-			break
-		}
-	}
-
-	// Если путь изменился после rewrite, выполнить новый запрос
-	if r.URL.Path != originalPath {
-		r.RequestURI = r.URL.RequestURI()
-		g.handleRequest(w, r)
-		return
-	}
-
-	// Proxy or serve application
-	if host.DefaultProxy != "" || (host.AppMode == "dotnet" && host.InternalPort != 0) || (host.AppMode == "nodejs" && g.config.NodeConfig.Enabled && g.config.NodeConfig.InternalPort != 0) {
-		var proxyUrl string
-		if host.DefaultProxy != "" {
-			proxyUrl = host.DefaultProxy
-		} else if host.AppMode == "dotnet" {
-			proxyUrl = fmt.Sprintf("http://127.0.0.1:%d", host.InternalPort)
-		} else if host.AppMode == "nodejs" {
-			proxyUrl = fmt.Sprintf("http://127.0.0.1:%d", g.config.NodeConfig.InternalPort)
-		}
-		g.proxyRequest(w, r, proxyUrl)
-		return
-	}
-
-	// Serve file or SPA
 	g.serveFileOrSpa(w, r, host)
-}
-
-func (g *GubinNET) serveHostNotFoundPage(w http.ResponseWriter, r *http.Request) {
-	g.logger.Info("Host not found page served", map[string]interface{}{
-		"path":       r.URL.Path,
-		"method":     r.Method,
-		"remote":     r.RemoteAddr,
-		"user_agent": r.UserAgent(),
-	})
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(http.StatusNotFound)
-	html := `
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Host Not Found</title>
-    <style>
-        body { font-family: Arial, sans-serif; text-align: center; margin: 50px; }
-        h1 { color: #d9534f; }
-        p { color: #555; }
-        .instructions { margin-top: 20px; font-size: 14px; line-height: 1.6; }
-        .instructions a { color: #007bff; text-decoration: none; }
-        .instructions a:hover { text-decoration: underline; }
-    </style>
-</head>
-<body>
-    <h1>Host Not Found</h1>
-    <p>The requested host could not be found on this server.</p>
-    <div class="instructions">
-        <p>Please check the following:</p>
-        <ul style="text-align: left; display: inline-block;">
-            <li>Ensure that you are accessing the correct domain or subdomain.</li>
-            <li>Verify your DNS settings to ensure they point to the correct server.</li>
-            <li>Contact your system administrator if you believe this is an error.</li>
-        </ul>
-        <p>If you are the administrator, make sure the host is properly configured in the server's configuration file.</p>
-    </div>
-    <p>Server: GubinNET/1.4</p>
-</body>
-</html>
-`
-	w.Write([]byte(html))
 }
 
 // Проксирование запросов
 func (g *GubinNET) proxyRequest(w http.ResponseWriter, r *http.Request, proxyUrl string) {
 	client := &http.Client{
-		Timeout: g.config.RequestTimeout,
-		Transport: &http.Transport{
-			ResponseHeaderTimeout: g.config.RequestTimeout / 2,
-		},
-		Jar: g.cookieJar,
+		Timeout: 30 * time.Second,
 	}
 	req, err := http.NewRequest(r.Method, proxyUrl+r.URL.RequestURI(), r.Body)
 	if err != nil {
@@ -804,160 +273,28 @@ func (g *GubinNET) proxyRequest(w http.ResponseWriter, r *http.Request, proxyUrl
 		return
 	}
 	defer req.Body.Close()
+
 	for key, values := range r.Header {
 		for _, value := range values {
 			req.Header.Add(key, value)
 		}
 	}
-	req.Header.Set("X-Real-IP", getRealIP(r))
-	req.Header.Set("X-Forwarded-For", getRealIP(r))
+
 	resp, err := client.Do(req)
 	if err != nil {
 		g.serveErrorPage(w, r, http.StatusBadGateway, "Proxy error")
 		return
 	}
 	defer resp.Body.Close()
+
 	for key, values := range resp.Header {
-		if key == "Set-Cookie" {
-			w.Header()["Set-Cookie"] = values
-		} else {
-			for _, value := range values {
-				w.Header().Add(key, value)
-			}
-		}
+		w.Header()[key] = values
 	}
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
 }
 
-// Обслуживание файлов или SPA
-func (g *GubinNET) serveFileOrSpa(w http.ResponseWriter, r *http.Request, host *VirtualHost) {
-	webRootPath := host.WebRootPath
-	if webRootPath == "" {
-		webRootPath = host.BasePath
-	}
-	requestPath := filepath.Clean(strings.TrimLeft(r.URL.Path, "/"))
-	fullPath := filepath.Join(webRootPath, requestPath)
-	fileInfo, err := os.Stat(fullPath)
-	if err == nil && !fileInfo.IsDir() {
-		g.serveFile(w, r, fullPath, fileInfo)
-		return
-	}
-	if host.SPAFallback != "" {
-		spaPath := filepath.Join(webRootPath, host.SPAFallback)
-		if _, err := os.Stat(spaPath); err == nil {
-			g.serveFile(w, r, spaPath, nil)
-			return
-		}
-	}
-	g.serveErrorPage(w, r, http.StatusNotFound, "File Not Found")
-}
-
-// Обслуживание файла
-func (g *GubinNET) serveFile(w http.ResponseWriter, r *http.Request, filePath string, fileInfo os.FileInfo) {
-	g.mu.Lock()
-	cached, found := g.cache[filePath]
-	g.mu.Unlock()
-	if !found || (fileInfo != nil && fileInfo.ModTime().After(cached.modTime)) {
-		if fileInfo == nil {
-			var err error
-			fileInfo, err = os.Stat(filePath)
-			if err != nil {
-				g.serveErrorPage(w, r, http.StatusInternalServerError, "Internal Server Error")
-				return
-			}
-		}
-		if fileInfo.Size() > g.config.MaxRequestSize {
-			g.serveErrorPage(w, r, http.StatusRequestEntityTooLarge, "File too large")
-			return
-		}
-		content, err := os.ReadFile(filePath)
-		if err != nil {
-			g.serveErrorPage(w, r, http.StatusInternalServerError, "Internal Server Error")
-			return
-		}
-		cached = &cacheEntry{
-			content:     content,
-			modTime:     fileInfo.ModTime(),
-			size:        fileInfo.Size(),
-			contentType: getContentType(filePath),
-		}
-		g.mu.Lock()
-		g.cache[filePath] = cached
-		g.mu.Unlock()
-	}
-	w.Header().Set("Content-Type", cached.contentType)
-	w.Header().Set("Content-Length", strconv.FormatInt(cached.size, 10))
-	w.Header().Set("Last-Modified", cached.modTime.Format(http.TimeFormat))
-	etag := fmt.Sprintf(`"%x-%x"`, cached.modTime.Unix(), cached.size)
-	w.Header().Set("ETag", etag)
-	if match := r.Header.Get("If-None-Match"); match == etag {
-		w.WriteHeader(http.StatusNotModified)
-		return
-	}
-	if modSince := r.Header.Get("If-Modified-Since"); modSince != "" {
-		modTime, err := http.ParseTime(modSince)
-		if err == nil && cached.modTime.Before(modTime.Add(time.Second)) {
-			w.WriteHeader(http.StatusNotModified)
-			return
-		}
-	}
-	if g.config.EnableGzip && strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
-		w.Header().Set("Content-Encoding", "gzip")
-		gz := gzip.NewWriter(w)
-		defer gz.Close()
-		gz.Write(cached.content)
-	} else {
-		w.Write(cached.content)
-	}
-}
-
-// Определение типа контента
-func getContentType(filePath string) string {
-	ext := strings.ToLower(filepath.Ext(filePath))
-	switch ext {
-	case ".html":
-		return "text/html; charset=utf-8"
-	case ".css":
-		return "text/css"
-	case ".js":
-		return "application/javascript"
-	case ".json":
-		return "application/json"
-	case ".png":
-		return "image/png"
-	case ".jpg", ".jpeg":
-		return "image/jpeg"
-	case ".gif":
-		return "image/gif"
-	case ".svg":
-		return "image/svg+xml"
-	case ".webp":
-		return "image/webp"
-	case ".woff":
-		return "font/woff"
-	case ".woff2":
-		return "font/woff2"
-	case ".ttf":
-		return "font/ttf"
-	case ".eot":
-		return "application/vnd.ms-fontobject"
-	case ".otf":
-		return "font/otf"
-	case ".xml":
-		return "application/xml"
-	case ".pdf":
-		return "application/pdf"
-	case ".zip":
-		return "application/zip"
-	case ".txt":
-		return "text/plain; charset=utf-8"
-	default:
-		return "application/octet-stream"
-	}
-}
-
-// Страница ошибки
+// Служебные функции
 func (g *GubinNET) serveErrorPage(w http.ResponseWriter, r *http.Request, statusCode int, message string) {
 	g.logger.Info("Error page served", map[string]interface{}{
 		"path":       r.URL.Path,
@@ -967,6 +304,7 @@ func (g *GubinNET) serveErrorPage(w http.ResponseWriter, r *http.Request, status
 		"remote":     r.RemoteAddr,
 		"user_agent": r.UserAgent(),
 	})
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(statusCode)
 	html := fmt.Sprintf(`
@@ -993,12 +331,172 @@ func (g *GubinNET) serveErrorPage(w http.ResponseWriter, r *http.Request, status
 	w.Write([]byte(html))
 }
 
-var (
-	rateLimiter     = make(map[string]time.Time)
-	rateLimiterLock sync.Mutex
-)
+func (g *GubinNET) serveHostNotFoundPage(w http.ResponseWriter, r *http.Request) {
+	g.logger.Info("Host not found page served", map[string]interface{}{
+		"path":       r.URL.Path,
+		"method":     r.Method,
+		"remote":     r.RemoteAddr,
+		"user_agent": r.UserAgent(),
+	})
 
-// Получение реального IP
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusNotFound)
+	html := `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Host Not Found</title>
+    <style>
+        body { font-family: Arial, sans-serif; text-align: center; margin: 50px; }
+        h1 { color: #d9534f; }
+        p { color: #555; }
+    </style>
+</head>
+<body>
+    <h1>Host Not Found</h1>
+    <p>The requested host could not be found on this server.</p>
+    <p>Server: GubinNET/1.4</p>
+</body>
+</html>
+`
+	w.Write([]byte(html))
+}
+
+func (g *GubinNET) serveFile(w http.ResponseWriter, r *http.Request, filePath string, fileInfo os.FileInfo) {
+	g.mu.Lock()
+	cached, found := g.cache[filePath]
+	g.mu.Unlock()
+
+	if !found || (fileInfo != nil && fileInfo.ModTime().After(cached.modTime)) {
+		if fileInfo == nil {
+			var err error
+			fileInfo, err = os.Stat(filePath)
+			if err != nil {
+				g.serveErrorPage(w, r, http.StatusInternalServerError, "Internal Server Error")
+				return
+			}
+		}
+
+		content, err := os.ReadFile(filePath)
+		if err != nil {
+			g.serveErrorPage(w, r, http.StatusInternalServerError, "Internal Server Error")
+			return
+		}
+
+		cached = &cacheEntry{
+			content:     content,
+			modTime:     fileInfo.ModTime(),
+			size:        fileInfo.Size(),
+			contentType: getContentType(filePath),
+		}
+
+		g.mu.Lock()
+		g.cache[filePath] = cached
+		g.mu.Unlock()
+	}
+
+	w.Header().Set("Content-Type", cached.contentType)
+	w.Header().Set("Content-Length", strconv.FormatInt(cached.size, 10))
+	w.Header().Set("Last-Modified", cached.modTime.Format(http.TimeFormat))
+	etag := fmt.Sprintf(`"%x-%x"`, cached.modTime.Unix(), cached.size)
+	w.Header().Set("ETag", etag)
+
+	if match := r.Header.Get("If-None-Match"); match == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+
+	if modSince := r.Header.Get("If-Modified-Since"); modSince != "" {
+		modTime, err := http.ParseTime(modSince)
+		if err == nil && cached.modTime.Before(modTime.Add(time.Second)) {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+	}
+
+	if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+		w.Header().Set("Content-Encoding", "gzip")
+		gz := gzip.NewWriter(w)
+		defer gz.Close()
+		gz.Write(cached.content)
+	} else {
+		w.Write(cached.content)
+	}
+}
+
+func (g *GubinNET) loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		requestID := r.Header.Get("X-Request-ID")
+		if requestID == "" {
+			requestID = fmt.Sprintf("%d", time.Now().UnixNano())
+		}
+		g.logger.Info("Request started", map[string]interface{}{
+			"request_id": requestID,
+			"method":     r.Method,
+			"path":       r.URL.Path,
+			"remote":     r.RemoteAddr,
+			"user_agent": r.UserAgent(),
+		})
+		w.Header().Set("X-Request-ID", requestID)
+		ww := &responseWriterWrapper{w: w}
+		next.ServeHTTP(ww, r)
+		g.logger.Info("Request completed", map[string]interface{}{
+			"request_id":  requestID,
+			"method":      r.Method,
+			"path":        r.URL.Path,
+			"status":      ww.status,
+			"duration_ms": time.Since(start).Milliseconds(),
+		})
+	})
+}
+
+func (g *GubinNET) metricsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		activeConnections.Inc()
+		defer activeConnections.Dec()
+		ww := &responseWriterWrapper{w: w}
+		next.ServeHTTP(ww, r)
+		duration := time.Since(start).Seconds()
+		requestDuration.WithLabelValues(r.Method, r.URL.Path).Observe(duration)
+		requestsTotal.WithLabelValues(r.Method, r.URL.Path, strconv.Itoa(ww.status)).Inc()
+	})
+}
+
+func (g *GubinNET) serveFileOrSpa(w http.ResponseWriter, r *http.Request, host *VirtualHost) {
+	webRootPath := host.Root
+	if webRootPath == "" {
+		g.serveErrorPage(w, r, http.StatusInternalServerError, "Server configuration error")
+		return
+	}
+
+	requestPath := filepath.Clean(strings.TrimLeft(r.URL.Path, "/"))
+	fullPath := filepath.Join(webRootPath, requestPath)
+	fileInfo, err := os.Stat(fullPath)
+	if err == nil && !fileInfo.IsDir() {
+		g.serveFile(w, r, fullPath, fileInfo)
+		return
+	}
+
+	if len(host.TryFiles) > 0 {
+		for _, tryFile := range host.TryFiles {
+			if tryFile == "$uri" {
+				continue
+			}
+			tryPath := filepath.Join(webRootPath, tryFile)
+			if _, err := os.Stat(tryPath); err == nil {
+				g.serveFile(w, r, tryPath, nil)
+				return
+			}
+		}
+	}
+
+	g.serveErrorPage(w, r, http.StatusNotFound, "File Not Found")
+}
+
 func getRealIP(r *http.Request) string {
 	ip := r.Header.Get("X-Real-IP")
 	if ip == "" {
@@ -1007,26 +505,64 @@ func getRealIP(r *http.Request) string {
 	return ip
 }
 
-// Обработка WebSocket соединений
-func (g *GubinNET) handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	conn, err := g.upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Println("WebSocket upgrade error:", err)
-		return
+func (g *GubinNET) setupMiddleware(handler http.Handler) http.Handler {
+	if g.antiDDoS == nil {
+		g.logger.Error("AntiDDoS is not initialized", nil)
+		os.Exit(1)
 	}
-	defer conn.Close()
-	for {
-		messageType, message, err := conn.ReadMessage()
-		if err != nil {
-			log.Println("WebSocket read error:", err)
-			break
-		}
-		log.Printf("Received: %s", message)
-		if err := conn.WriteMessage(messageType, message); err != nil {
-			log.Println("WebSocket write error:", err)
-			break
-		}
+
+	return g.securityMiddleware(
+		g.antiDDoS.Middleware(
+			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				g.loggingMiddleware(
+					g.metricsMiddleware(handler),
+				).ServeHTTP(w, r)
+			}),
+		),
+	)
+}
+
+func getContentType(filePath string) string {
+	ext := strings.ToLower(filepath.Ext(filePath))
+	switch ext {
+	case ".html":
+		return "text/html; charset=utf-8"
+	case ".css":
+		return "text/css"
+	case ".js":
+		return "application/javascript"
+	case ".json":
+		return "application/json"
+	case ".png":
+		return "image/png"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".gif":
+		return "image/gif"
+	default:
+		return "application/octet-stream"
 	}
+}
+
+type responseWriterWrapper struct {
+	w      http.ResponseWriter
+	status int
+}
+
+func (w *responseWriterWrapper) Header() http.Header {
+	return w.w.Header()
+}
+
+func (w *responseWriterWrapper) Write(b []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.w.Write(b)
+}
+
+func (w *responseWriterWrapper) WriteHeader(statusCode int) {
+	w.status = statusCode
+	w.w.WriteHeader(statusCode)
 }
 
 func main() {
@@ -1035,58 +571,43 @@ func main() {
 		fmt.Println("Failed to initialize logger")
 		os.Exit(1)
 	}
-	config := &ConfigParser{
-		logger:         logger,
-		MaxRequestSize: 10 << 20, // 10MB default
-		RequestTimeout: 30 * time.Second,
-		EnableMetrics:  true,
-		EnableGzip:     true,
-	}
 
-	// Определение пути к конфигурационному файлу
-	configPath := os.Getenv("GUBINNET_CONFIG")
-	if configPath == "" {
-		if os.PathSeparator == '\\' {
-			exePath, err := os.Executable()
-			if err != nil {
-				logger.Error("Failed to get executable path", map[string]interface{}{
-					"error": err,
-				})
-				os.Exit(1)
-			}
-			configPath = filepath.Join(filepath.Dir(exePath), "config.ini")
-		} else {
-			configPath = "/etc/gubinnet/config.ini"
-		}
-	}
+	config := &ConfigParser{}
+
+	// Строка подключения к базе данных
+	dbConnectionString := "user:password@tcp(127.0.0.1:3306)/gubinnet"
 
 	// Загрузка конфигурации
-	err := config.Load(configPath)
+	err := config.Load(dbConnectionString)
 	if err != nil {
 		logger.Error("Failed to load config", map[string]interface{}{
 			"error": err,
-			"path":  configPath,
 		})
 		os.Exit(1)
 	}
 
-	// Инициализация сервера
+	// Инициализация AntiDDoS
+	defaultConfig := &antiddos.AntiDDoSConfig{
+		MaxRequestsPerSecond: 100,
+		BlockDuration:        60 * time.Second,
+	}
+	antiDDoS := antiddos.NewAntiDDoS(defaultConfig, logger)
+
 	server := &GubinNET{
-		config: config,
-		logger: logger,
-		cache:  make(map[string]*cacheEntry),
+		config:   config,
+		logger:   logger,
+		cache:    make(map[string]*cacheEntry),
+		antiDDoS: antiDDoS,
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
 			CheckOrigin: func(r *http.Request) bool {
-				return true // Разрешаем все источники для WebSocket
+				return true
 			},
 		},
+		dbConnectionString: dbConnectionString,
 	}
 
-	// Запуск основного сервера
 	server.Start()
-
-	// Блокировка основного потока для предотвращения завершения программы
 	select {}
 }
