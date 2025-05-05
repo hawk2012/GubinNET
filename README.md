@@ -17,8 +17,8 @@ GubinNET is a modern web server designed to simplify the deployment and manageme
    - Support for data compression (Gzip) ensures efficient file transfer.
 
 ### 4. **Flexible Configuration**
-   - All configurations are now managed through the database (`MySQL`) instead of static configuration files.
-   - Virtual hosts, SSL certificates, and redirection rules are stored in the database for easy management.
+   - All configurations are managed through INI-like files located in `/etc/gubinnet/config`.
+   - Virtual hosts, SSL certificates, and redirection rules are defined in separate `.ini` files for easy management.
 
 ### 5. **Monitoring and Diagnostics**
    - Built-in Prometheus metrics provide insights into server performance, including request counts, durations, and active connections.
@@ -48,43 +48,36 @@ GubinNET is a modern web server designed to simplify the deployment and manageme
      go version
      ```
 
-### 2. **Set Up MySQL Database**
-   GubinNET uses MySQL as its database backend to store configuration data. Follow these steps to set up MySQL:
+### 2. **Set Up Configuration Directory**
+   GubinNET uses INI-like configuration files stored in `/etc/gubinnet/config`. Follow these steps to set up the configuration:
 
-   #### a. **Install MySQL**
-   - Install MySQL on your server or local machine:
+   #### a. **Create Configuration Directory**
+   - Create the configuration and logs directories:
      ```bash
-     sudo apt update
-     sudo apt install mysql-server
-     ```
-   - Secure your MySQL installation:
-     ```bash
-     sudo mysql_secure_installation
+     sudo mkdir -p /etc/gubinnet/{config,logs}
      ```
 
-   #### b. **Create a Database and User**
-   - Log in to MySQL:
-     ```bash
-     sudo mysql -u root -p
-     ```
-   - Create a database named `gubinnet`:
-     ```sql
-     CREATE DATABASE gubinnet;
-     ```
-   - Create a user and grant privileges:
-     ```sql
-     CREATE USER 'gubinnet_user'@'localhost' IDENTIFIED BY 'your_password';
-     GRANT ALL PRIVILEGES ON gubinnet.* TO 'gubinnet_user'@'localhost';
-     FLUSH PRIVILEGES;
-     EXIT;
+   #### b. **Add Virtual Host Configuration**
+   - Create an INI file for each virtual host in `/etc/gubinnet/config`. Example (`example.com.ini`):
+     ```ini
+     server_name=example.com
+     listen_port=80
+     root_path=/var/www/example
+     index_file=index.html
+     try_files=$uri /index.html
+     use_ssl=false
+     cert_path=
+     key_path=
+     redirect_to_https=true
+     proxy_url=
      ```
 
-   #### c. **Import Default Data**
-   - Use the provided `default.sql` file to populate the database with initial settings:
+   #### c. **Verify Root Path**
+   - Ensure the `root_path` exists and contains your website or application files:
      ```bash
-     mysql -u gubinnet_user -p gubinnet < default.sql
+     sudo mkdir -p /var/www/example
+     sudo cp -r your-files/* /var/www/example/
      ```
-   - This file contains the schema and test data for virtual hosts, SSL certificates, and redirection rules.
 
 ### 3. **Build and Run the Server**
    - Clone the repository and navigate to the project directory:
@@ -101,24 +94,28 @@ GubinNET is a modern web server designed to simplify the deployment and manageme
      ./gubinnet
      ```
 
-### 4. **Add Your Files**
-   - Place your website or application files in the designated folder. For example:
-     ```
-     /var/www/my-site
+### 4. **Reload Configurations**
+   - To reload configurations without restarting the server, send the `SIGHUP` signal:
+     ```bash
+     kill -SIGHUP <server-pid>
      ```
 
 ## **Key Features in the Code**
 
-### 1. **Database-Driven Configuration**
-   - Virtual hosts, SSL certificates, and redirection rules are stored in the `virtual_hosts` table in MySQL.
-   - Example query to add a new virtual host:
-     ```sql
-     INSERT INTO virtual_hosts (
-         server_name, listen_port, root_path, index_file, try_files, use_ssl, 
-         cert_path, key_path, redirect_to_https
-     ) VALUES (
-         'example.com', 80, '/var/www/example', 'index.html', '$uri /index.html', FALSE, NULL, NULL, TRUE
-     );
+### 1. **INI-Based Configuration**
+   - Virtual hosts, SSL certificates, and redirection rules are stored in INI-like files in `/etc/gubinnet/config`.
+   - Example configuration (`example.com.ini`):
+     ```ini
+     server_name=example.com
+     listen_port=80
+     root_path=/var/www/example
+     index_file=index.html
+     try_files=$uri /index.html
+     use_ssl=false
+     cert_path=
+     key_path=
+     redirect_to_https=true
+     proxy_url=
      ```
 
 ### 2. **AntiDDoS Protection**
@@ -127,10 +124,30 @@ GubinNET is a modern web server designed to simplify the deployment and manageme
 
 ### 3. **HTTPS Support with SNI**
    - The server supports multiple SSL certificates using Server Name Indication (SNI).
-   - Certificates are dynamically loaded from the database based on the requested hostname.
+   - Certificates are dynamically loaded from the filesystem based on the requested hostname.
 
 ### 4. **Graceful Shutdown and Reload**
    - The server listens for system signals (`SIGTERM`, `SIGHUP`) to gracefully shut down or reload configurations.
+
+### 5. **Custom Error Pages**
+   - GubinNET serves user-friendly error pages for common HTTP errors (e.g., 404 Not Found, 500 Internal Server Error). These pages include details such as the request ID for easier debugging.
+
+### 6. **PHP Support**
+   - GubinNET supports PHP applications using the `php-cgi` binary. To enable PHP support:
+     ```bash
+     sudo apt install php-cgi
+     ```
+
+### 7. **Prometheus Metrics**
+   - GubinNET exposes metrics for monitoring using Prometheus. Metrics include:
+     - Total HTTP requests
+     - Request durations
+     - Active connections
+
+   To access metrics:
+   1. Install Prometheus: [Prometheus Installation Guide](https://prometheus.io/docs/prometheus/latest/installation/)
+   2. Configure Prometheus to scrape metrics from `http://<server-ip>:<metrics-port>/metrics`.
+   3. Visualize metrics using Grafana or Prometheus's built-in dashboard.
 
 ## **Why Choose GubinNET?**
 
@@ -151,8 +168,9 @@ We hope this server becomes your reliable assistant in the world of web developm
 ---
 
 ### **Additional Notes**
-- **`default.sql`**: This file is included in the repository and contains the initial database schema and test data. Use it to set up your MySQL database during the first installation.
-- **Database Connection String**: Update the MySQL connection string in the `main.go` file to match your database credentials:
-  ```go
-  dbConnectionString := "user:password@tcp(127.0.0.1:3306)/gubinnet"
+- **Configuration Directory**: Ensure the `/etc/gubinnet/config` directory exists and contains valid `.ini` files for each virtual host.
+- **Logs Directory**: Logs are stored in `/etc/gubinnet/logs` for easy analysis.
+- **PHP-CGI**: Install `php-cgi` to enable PHP support:
+  ```bash
+  sudo apt install php-cgi
   ```

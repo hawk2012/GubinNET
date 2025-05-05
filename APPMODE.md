@@ -1,16 +1,16 @@
 # GubinNET AppMode Configuration
 
-GubinNET supports multiple application modes (`AppMode`) to handle requests dynamically based on the type of application or service being hosted. The `AppMode` is defined in the MySQL database for each virtual host and determines how incoming requests are processed.
+GubinNET supports multiple application modes (`AppMode`) to handle requests dynamically based on the type of application or service being hosted. The `AppMode` is defined in `.ini` configuration files for each virtual host and determines how incoming requests are processed.
 
 ## Supported AppModes
 
 ### 1. **dotnet**
    - **Purpose**: Used to run ASP.NET Core applications.
    - **Required Parameters**:
-     - `DllPath`: Path to the compiled `.dll` file of the application.
-     - `InternalPort`: Internal port on which the application runs.
+     - `dll_path`: Path to the compiled `.dll` file of the application.
+     - `internal_port`: Internal port on which the application runs.
    - **Environment Variables**:
-     - `ASPNETCORE_URLS=http://0.0.0.0:{InternalPort}`
+     - `ASPNETCORE_URLS=http://0.0.0.0:{internal_port}`
      - `ASPNETCORE_ENVIRONMENT=Production`
      - `DOTNET_PRINT_TELEMETRY_MESSAGE=false`
      - `ASPNETCORE_SERVER_HEADER=`
@@ -23,10 +23,10 @@ GubinNET supports multiple application modes (`AppMode`) to handle requests dyna
 ### 2. **nodejs**
    - **Purpose**: Used to run Node.js applications.
    - **Required Parameters**:
-     - `ScriptPath`: Path to the main JavaScript file of the application.
-     - `InternalPort`: Internal port on which the application listens.
+     - `script_path`: Path to the main JavaScript file of the application.
+     - `internal_port`: Internal port on which the application listens.
    - **Environment Variables**:
-     - `PORT={InternalPort}`
+     - `PORT={internal_port}`
      - `NODE_ENV=production`
    - **Behavior**:
      - Requests are proxied to the internal port where the Node.js application is running.
@@ -37,7 +37,7 @@ GubinNET supports multiple application modes (`AppMode`) to handle requests dyna
 ### 3. **Proxy Mode**
    - **Purpose**: Proxies requests to an external backend server.
    - **Required Parameter**:
-     - `DefaultProxy`: URL of the backend server to which requests should be proxied.
+     - `proxy_url`: URL of the backend server to which requests should be proxied.
    - **Behavior**:
      - All incoming requests are forwarded to the specified backend URL.
      - Useful for load balancing or integrating with external services.
@@ -47,56 +47,64 @@ GubinNET supports multiple application modes (`AppMode`) to handle requests dyna
 ### 4. **Static File Server**
    - **Purpose**: Serves static files (HTML, CSS, JS, etc.) directly from a specified directory.
    - **Required Parameters**:
-     - `WebRootPath`: Directory containing the static files.
-     - `SPAFallback`: Fallback file for Single Page Applications (e.g., `index.html`).
+     - `root_path`: Directory containing the static files.
+     - `try_files`: Fallback file for Single Page Applications (e.g., `index.html`).
    - **Behavior**:
-     - Files are served directly from the `WebRootPath`.
-     - If `SPAFallback` is specified, unmatched routes serve the fallback file (useful for SPAs like React or Angular).
+     - Files are served directly from the `root_path`.
+     - If `try_files` is specified, unmatched routes serve the fallback file (useful for SPAs like React or Angular).
 
-## Example Configurations in MySQL
+## Example Configurations
 
 ### .NET Application
-```sql
-INSERT INTO virtual_hosts (
-    server_name, listen_port, root_path, app_mode, dll_path, internal_port, use_ssl, 
-    cert_path, key_path, redirect_to_https
-) VALUES (
-    'example.com', 80, '/var/www/example', 'dotnet', '/var/www/example/app.dll', 5000, TRUE, 
-    '/etc/ssl/certs/example.com.crt', '/etc/ssl/private/example.com.key', TRUE
-);
+```ini
+server_name=example.com
+listen_port=80
+root_path=/var/www/example
+app_mode=dotnet
+dll_path=/var/www/example/app.dll
+internal_port=5000
+use_ssl=true
+cert_path=/etc/ssl/certs/example.com.crt
+key_path=/etc/ssl/private/example.com.key
+redirect_to_https=true
 ```
 
 ### Node.js Application
-```sql
-INSERT INTO virtual_hosts (
-    server_name, listen_port, root_path, app_mode, script_path, internal_port, use_ssl, 
-    cert_path, key_path, redirect_to_https
-) VALUES (
-    'example.com', 80, '/var/www/example', 'nodejs', '/var/www/example/app.js', 3000, TRUE, 
-    '/etc/ssl/certs/example.com.crt', '/etc/ssl/private/example.com.key', TRUE
-);
+```ini
+server_name=example.com
+listen_port=80
+root_path=/var/www/example
+app_mode=nodejs
+script_path=/var/www/example/app.js
+internal_port=3000
+use_ssl=true
+cert_path=/etc/ssl/certs/example.com.crt
+key_path=/etc/ssl/private/example.com.key
+redirect_to_https=true
 ```
 
 ### Proxy Server
-```sql
-INSERT INTO virtual_hosts (
-    server_name, listen_port, root_path, default_proxy, use_ssl, 
-    cert_path, key_path, redirect_to_https
-) VALUES (
-    'example.com', 80, '', 'http://backend-server/', TRUE, 
-    '/etc/ssl/certs/example.com.crt', '/etc/ssl/private/example.com.key', TRUE
-);
+```ini
+server_name=example.com
+listen_port=80
+root_path=
+proxy_url=http://backend-server/
+use_ssl=true
+cert_path=/etc/ssl/certs/example.com.crt
+key_path=/etc/ssl/private/example.com.key
+redirect_to_https=true
 ```
 
 ### Static File Server
-```sql
-INSERT INTO virtual_hosts (
-    server_name, listen_port, root_path, spa_fallback, use_ssl, 
-    cert_path, key_path, redirect_to_https
-) VALUES (
-    'example.com', 80, '/var/www/html', 'index.html', TRUE, 
-    '/etc/ssl/certs/example.com.crt', '/etc/ssl/private/example.com.key', TRUE
-);
+```ini
+server_name=example.com
+listen_port=80
+root_path=/var/www/html
+try_files=index.html
+use_ssl=true
+cert_path=/etc/ssl/certs/example.com.crt
+key_path=/etc/ssl/private/example.com.key
+redirect_to_https=true
 ```
 
 ## Key Features
@@ -109,7 +117,7 @@ INSERT INTO virtual_hosts (
   - SSL certificates can be configured for secure connections in all modes.
 
 - **Fallback Mechanism**:
-  - For static file servers hosting SPAs, the `SPAFallback` parameter ensures unmatched routes serve the correct file (e.g., `index.html`).
+  - For static file servers hosting SPAs, the `try_files` parameter ensures unmatched routes serve the correct file (e.g., `index.html`).
 
 - **Monitoring and Logging**:
   - Requests and application states are logged for debugging and monitoring purposes.
@@ -123,9 +131,9 @@ INSERT INTO virtual_hosts (
 2. **Security**:
    - Always configure SSL certificates for secure communication, especially for production environments.
 
-3. **Database Configuration**:
-   - All configurations are stored in the `virtual_hosts` table in the MySQL database.
+3. **Configuration Files**:
+   - All configurations are currently stored in `.ini` files located in `/etc/gubinnet/config`.
    - Use the `SIGHUP` signal to reload configurations dynamically without restarting the server.
 
-4. **Error Handling**:
-   - If an application fails to start or crashes, the server logs detailed error messages for troubleshooting.
+4. **Future Work**:
+   - Migration to a MySQL database backend for centralized configuration management is planned.
