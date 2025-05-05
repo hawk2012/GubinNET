@@ -1,91 +1,158 @@
-# **GubinNET: Простой и мощный веб-сервер для ваших проектов**
+# **GubinNET: A Simple and Powerful Web Server for Your Projects**
 
-GubinNET — это современный веб-сервер, который упрощает запуск и обслуживание сайтов, приложений и API. Он подходит для разработчиков, владельцев сайтов и даже новичков, которые хотят быстро развернуть свой проект в интернете.
+GubinNET is a modern web server designed to simplify the deployment and management of websites, applications, and APIs. It is ideal for developers, website owners, and even beginners who want to quickly launch their projects online.
 
----
+## **What Can GubinNET Do?**
 
-## **Что может GubinNET?**
+### 1. **Launch Websites and Applications with Ease**
+   - Want to deploy a website or web application? Simply copy your project files into the server directory, and GubinNET will handle the rest.
+   - Supports popular technologies: .NET, Node.js, PHP, and static sites (HTML, CSS, JavaScript).
 
-### 1. **Запускайте сайты и приложения с легкостью**
-   - Хотите запустить сайт или веб-приложение? Просто скопируйте файлы вашего проекта в папку сервера, и GubinNET сделает все остальное.
-   - Поддерживает популярные технологии: .NET, Node.js, PHP и статические сайты (HTML, CSS, JavaScript).
+### 2. **Protection Against Malicious Activity**
+   - The server automatically protects your site from DDoS attacks and other threats using the `AntiDDoS` module.
+   - Built-in security tools, such as SSL/TLS support and basic authentication, ensure your data remains secure.
 
-### 2. **Защита от злоумышленников**
-   - Сервер автоматически защищает ваш сайт от DDoS-атак и других угроз. Вы можете настроить лимиты запросов, чтобы предотвратить перегрузку.
-   - Встроенные инструменты безопасности, такие как SSL/TLS и базовая аутентификация, гарантируют, что ваши данные остаются в безопасности.
+### 3. **Fast and Efficient Performance**
+   - GubinNET optimizes file handling and caches content for faster page loading.
+   - Support for data compression (Gzip) ensures efficient file transfer.
 
-### 3. **Работает быстро и эффективно**
-   - GubinNET оптимизирует работу с файлами и кэширует их для быстрой загрузки страниц.
-   - Поддержка сжатия данных (Gzip) делает передачу файлов еще быстрее.
+### 4. **Flexible Configuration**
+   - All configurations are now managed through the database (`MySQL`) instead of static configuration files.
+   - Virtual hosts, SSL certificates, and redirection rules are stored in the database for easy management.
 
-### 4. **Гибкая настройка**
-   - Настройте сервер под свои нужды с помощью простого конфигурационного файла. Вам не нужно быть экспертом — мы предоставляем примеры и пояснения для каждой настройки.
+### 5. **Monitoring and Diagnostics**
+   - Built-in Prometheus metrics provide insights into server performance, including request counts, durations, and active connections.
+   - Logs are recorded in an easy-to-read format, making it simple to analyze events.
 
-### 5. **Мониторинг и диагностика**
-   - Хотите узнать, как работает ваш сервер? GubinNET предоставляет встроенные инструменты мониторинга, которые показывают, сколько запросов обрабатывается и как долго они выполняются.
-   - Логи записываются в удобном формате, чтобы вы могли легко анализировать события.
+## **What Can You Use GubinNET For?**
 
----
+### 1. **Personal Websites and Blogs**
+   - If you want to create a blog, portfolio, or personal homepage, GubinNET makes it quick and easy.
 
-## **Для чего можно использовать GubinNET?**
+### 2. **Web Applications**
+   - Developing an application using Node.js, .NET, or PHP? GubinNET automatically launches and manages your applications.
 
-### 1. **Личные сайты и блоги**
-   - Если вы хотите создать свой блог, портфолио или домашнюю страницу, GubinNET поможет вам сделать это быстро и просто.
+### 3. **APIs and Microservices**
+   - Need a server for API operations? GubinNET supports request routing and proxying, making it perfect for microservice architectures.
 
-### 2. **Веб-приложения**
-   - Разрабатываете приложение на Node.js, .NET или PHP? GubinNET автоматически запускает и управляет вашими приложениями.
-
-### 3. **API и микросервисы**
-   - Нужен сервер для работы с API? GubinNET поддерживает маршрутизацию запросов и проксирование, что идеально подходит для микросервисной архитектуры.
-
-### 4. **Сайты с динамическим контентом**
-   - GubinNET отлично справляется с одностраничными приложениями (SPA), такими как React, Angular или Vue.js, благодаря поддержке fallback-маршрутов.
+### 4. **Dynamic Content Websites**
+   - GubinNET excels at handling single-page applications (SPAs) like React, Angular, or Vue.js, thanks to its support for fallback routes.
 
 ---
 
-## **Как начать?**
+## **How to Get Started?**
 
-### 1. **Установите GubinNET**
-   - Скачайте и установите сервер на ваш компьютер или хостинг. Мы предоставляем подробные инструкции для всех платформ.
+### 1. **Install GubinNET**
+   - Download and install the server on your computer or hosting environment. Ensure you have Go installed:
+     ```bash
+     go version
+     ```
 
-### 2. **Добавьте свои файлы**
-   - Поместите файлы вашего сайта или приложения в указанную папку. Например:
+### 2. **Set Up MySQL Database**
+   GubinNET uses MySQL as its database backend to store configuration data. Follow these steps to set up MySQL:
+
+   #### a. **Install MySQL**
+   - Install MySQL on your server or local machine:
+     ```bash
+     sudo apt update
+     sudo apt install mysql-server
+     ```
+   - Secure your MySQL installation:
+     ```bash
+     sudo mysql_secure_installation
+     ```
+
+   #### b. **Create a Database and User**
+   - Log in to MySQL:
+     ```bash
+     sudo mysql -u root -p
+     ```
+   - Create a database named `gubinnet`:
+     ```sql
+     CREATE DATABASE gubinnet;
+     ```
+   - Create a user and grant privileges:
+     ```sql
+     CREATE USER 'gubinnet_user'@'localhost' IDENTIFIED BY 'your_password';
+     GRANT ALL PRIVILEGES ON gubinnet.* TO 'gubinnet_user'@'localhost';
+     FLUSH PRIVILEGES;
+     EXIT;
+     ```
+
+   #### c. **Import Default Data**
+   - Use the provided `default.sql` file to populate the database with initial settings:
+     ```bash
+     mysql -u gubinnet_user -p gubinnet < default.sql
+     ```
+   - This file contains the schema and test data for virtual hosts, SSL certificates, and redirection rules.
+
+### 3. **Build and Run the Server**
+   - Clone the repository and navigate to the project directory:
+     ```bash
+     git clone https://github.com/hawk2012/GubinNET.git
+     cd GubinNET
+     ```
+   - Build the server:
+     ```bash
+     go build -o gubinnet
+     ```
+   - Run the server:
+     ```bash
+     ./gubinnet
+     ```
+
+### 4. **Add Your Files**
+   - Place your website or application files in the designated folder. For example:
      ```
      /var/www/my-site
      ```
 
-### 3. **Настройте конфигурацию**
-   - Откройте файл `config.ini` и укажите основные параметры, такие как домен, порты и пути к файлам. Пример:
-     ```ini
-     [Host:example.com]
-     BasePath=/var/www/example
-     WebRootPath=/var/www/example/public
+## **Key Features in the Code**
+
+### 1. **Database-Driven Configuration**
+   - Virtual hosts, SSL certificates, and redirection rules are stored in the `virtual_hosts` table in MySQL.
+   - Example query to add a new virtual host:
+     ```sql
+     INSERT INTO virtual_hosts (
+         server_name, listen_port, root_path, index_file, try_files, use_ssl, 
+         cert_path, key_path, redirect_to_https
+     ) VALUES (
+         'example.com', 80, '/var/www/example', 'index.html', '$uri /index.html', FALSE, NULL, NULL, TRUE
+     );
      ```
 
-### 4. **Запустите сервер**
-   - Запустите GubinNET одной командой:
-     ```bash
-     ./gubinnet start
-     ```
+### 2. **AntiDDoS Protection**
+   - The `AntiDDoS` module limits the number of requests per second from a single IP address.
+   - If the limit is exceeded, the IP is blocked for a configurable duration.
+
+### 3. **HTTPS Support with SNI**
+   - The server supports multiple SSL certificates using Server Name Indication (SNI).
+   - Certificates are dynamically loaded from the database based on the requested hostname.
+
+### 4. **Graceful Shutdown and Reload**
+   - The server listens for system signals (`SIGTERM`, `SIGHUP`) to gracefully shut down or reload configurations.
+
+## **Why Choose GubinNET?**
+
+- **Ease of Use**: No complex configurations — everything works "out of the box."
+- **Reliability**: The server performs stably even under high loads.
+- **Security**: Protection against attacks and unauthorized access.
+- **Flexibility**: Support for multiple technologies and extensibility through plugins.
+
+## **Support and Help**
+
+If you have any questions or issues, our team is always ready to assist:
+- Official Repository: [GitHub](https://github.com/hawk2012/GubinNET)
+- Email: platform@gubin.systems
+
+**Thank you for choosing GubinNET!**  
+We hope this server becomes your reliable assistant in the world of web development. Try it today and see for yourself how simple and convenient it is! 😊
 
 ---
 
-## **Почему выбирают GubinNET?**
-
-- **Простота использования**: Никаких сложных настроек — все работает "из коробки".
-- **Надежность**: Сервер стабильно работает даже под высокой нагрузкой.
-- **Безопасность**: Защита от атак и несанкционированного доступа.
-- **Гибкость**: Поддержка множества технологий и возможность расширения функциональности через плагины.
-
----
-
-## **Поддержка и помощь**
-
-Если у вас возникли вопросы или проблемы, наша команда всегда готова помочь:
-- Официальный репозиторий: [GitHub](https://github.com/hawk2012/GubinNET)
-- Электронная почта: platform@gubin.systems
-
----
-
-**Спасибо, что выбрали GubinNET!**  
-Мы надеемся, что этот сервер станет вашим надежным помощником в мире веб-разработки. Попробуйте его прямо сейчас — и убедитесь сами, насколько это просто и удобно! 😊
+### **Additional Notes**
+- **`default.sql`**: This file is included in the repository and contains the initial database schema and test data. Use it to set up your MySQL database during the first installation.
+- **Database Connection String**: Update the MySQL connection string in the `main.go` file to match your database credentials:
+  ```go
+  dbConnectionString := "user:password@tcp(127.0.0.1:3306)/gubinnet"
+  ```
