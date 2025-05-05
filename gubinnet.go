@@ -323,7 +323,7 @@ func (g *GubinNET) serveErrorPage(w http.ResponseWriter, r *http.Request, status
 <body>
     <h1>Error %d</h1>
     <p>%s</p>
-    <p>Server: GubinNET/1.4</p>
+    <p>Server: GubinNET/1.5</p>
     <p>Request ID: %s</p>
 </body>
 </html>
@@ -357,7 +357,7 @@ func (g *GubinNET) serveHostNotFoundPage(w http.ResponseWriter, r *http.Request)
 <body>
     <h1>Host Not Found</h1>
     <p>The requested host could not be found on this server.</p>
-    <p>Server: GubinNET/1.4</p>
+    <p>Server: GubinNET/1.5</p>
 </body>
 </html>
 `

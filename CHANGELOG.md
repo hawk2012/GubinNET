@@ -1,120 +1,119 @@
 # Changelog
 
-## [1.4.1] - 2023-XX-XX
+## [1.5] - 2025-05-05
 
-### Добавлено
-- **Страница "Хост не найден"**: Добавлена специальная страница для случаев, когда запрашиваемый хост отсутствует в конфигурации. Страница предоставляет пользователю инструкции по устранению проблемы, такие как проверка DNS или обращение к администратору.
-- **Улучшенная обработка ошибок**: Добавлена поддержка более информативных сообщений об ошибках для пользователей и администраторов.
-- **Динамическая перезагрузка конфигурации**: Улучшена обработка сигнала `SIGHUP` для перезагрузки конфигурации без перезапуска сервера.
+### Overview
+This release marks a significant shift in the architecture of GubinNET. The server has been refactored to replace static configuration files with a dynamic MySQL database backend. This change improves flexibility, scalability, and ease of management for hosting multiple virtual hosts and configurations.
 
-### Исправлено
-- Исправлена проблема с отсутствующей функцией `ConfigParser.Load`, добавлена реализация загрузки конфигурационного файла в формате INI.
-- Исправлена работа WebSocket через безопасное соединение (`wss://`) при использовании HTTPS.
-- Исправлена логика кэширования файлов: теперь учитываются изменения файлов на диске.
-- Устранены потенциальные ошибки при инициализации логгера.
-- Исправлена обработка некорректных заголовков CORS.
-- Устранены проблемы с запуском Node.js приложений при неправильных путях.
+### Key Changes
 
-### Изменено
-- Обновлен метод `handleRequest` для интеграции новой страницы "Хост не найден".
-- Переработан стек middleware для улучшения модульности и удобства поддержки.
-- Улучшено логирование ключевых операций, таких как запуск, остановка сервера и перезагрузка конфигурации.
+#### 1. **Migration to MySQL Database**
+   - **Purpose**: To centralize and streamline configuration management.
+   - **Details**:
+     - Replaced the static `.ini` configuration file with a MySQL database schema.
+     - All virtual host configurations, SSL certificates, redirection rules, and other settings are now stored in the `virtual_hosts` table.
+     - Added support for dynamic reloading of configurations using the `SIGHUP` signal without restarting the server.
+   - **Benefits**:
+     - Simplified management of multiple virtual hosts.
+     - Real-time updates to configurations without downtime.
+     - Improved scalability for large-scale deployments.
 
-### Безопасность
-- Добавлена защита от атак path traversal с использованием строгой валидации путей.
-- Улучшена логика ограничения скорости запросов для предотвращения злоупотреблений.
-- Настроено использование безопасных значений для заголовков `Content-Type` и `Content-Disposition`.
+#### 2. **Dynamic SSL Certificate Loading with SNI**
+   - **Purpose**: To support multiple SSL certificates for different domains on the same server.
+   - **Details**:
+     - Implemented Server Name Indication (SNI) to dynamically load SSL certificates based on the requested hostname.
+     - Certificates and private keys are stored in the `cert_path` and `key_path` columns of the `virtual_hosts` table.
+     - HTTPS server listens on port 443 and uses the `GetCertificate` function to fetch the appropriate certificate for each request.
+   - **Benefits**:
+     - Enhanced security with domain-specific SSL certificates.
+     - Simplified management of SSL configurations.
 
-## [1.4] - 2025-05-02
+#### 3. **Automatic HTTP → HTTPS Redirection**
+   - **Purpose**: To enforce secure connections for configured domains.
+   - **Details**:
+     - Added a `redirect_to_https` column in the `virtual_hosts` table to enable or disable automatic redirection from HTTP to HTTPS.
+     - Requests to HTTP are redirected to HTTPS if the `redirect_to_https` flag is set to `TRUE`.
+   - **Benefits**:
+     - Improved security by ensuring all traffic is encrypted.
+     - Simplified enforcement of HTTPS policies.
 
-### Добавлено
-- **Правила перезаписи URL с условиями**:
-  - Добавлена поддержка правил перезаписи URL с условиями, таких как проверка существования файлов (`if -f`) или других параметров.
-  - Пример правила: `*.html if -f /path/to/file /new/path`.
-- **Автоматический редирект HTTP → HTTPS**:
-  - Реализован автоматический редирект с HTTP на HTTPS, если для хоста настроен SSL-сертификат.
-- **Сохранение параметров запроса**:
-  - Добавлена поддержка сохранения параметров запроса (`query string`) при выполнении правил перезаписи URL.
-- **Расширенная система плагинов**:
-  - Расширен интерфейс плагинов для поддержки более сложной логики обработки запросов.
-  - Добавлены примеры плагинов для демонстрации возможностей системы.
-- **Поддержка Razor Pages**:
-  - Добавлена специальная поддержка .NET Razor Pages через новую директиву конфигурации `AppType=razorpages`.
-- **Улучшенная обработка ошибок**:
-  - Добавлены более информативные сообщения об ошибках для пользователей и администраторов.
-- **Поддержка HTTP/3**:
-  - Добавлена поддержка протокола HTTP/3 с использованием QUIC для улучшения производительности и безопасности.
-  - HTTP/3 доступен на том же порту, что и HTTPS.
+#### 4. **Enhanced Security Middleware**
+   - **Purpose**: To protect against malicious requests and common vulnerabilities.
+   - **Details**:
+     - Added middleware to block suspicious patterns such as `.env`, `/shell`, and `/wordpress/wp-admin/setup-config.php`.
+     - Logs blocked requests with detailed information, including IP addresses and paths.
+   - **Benefits**:
+     - Reduced risk of unauthorized access and attacks.
+     - Improved logging for security audits.
 
-### Изменено
-- **Оптимизация кода**:
-  - Оптимизирована работа с кэшем для уменьшения задержек при обслуживании статических файлов.
-  - Улучшена производительность middleware за счет минимизации блокировок.
-- **Обработка конфигурационного файла**:
-  - Улучшена обработка комментариев и пустых строк в конфигурационном файле.
-  - Добавлена поддержка новых директив, таких как `AppType` и `RewriteRule`.
-- **Логирование**:
-  - Добавлены дополнительные поля в логи для упрощения отладки (например, `host`, `path`, `method`).
-  - Улучшено форматирование JSON-логов для совместимости с системами сбора логов.
-- **WebSocket**:
-  - Добавлена возможность отправки широковещательных сообщений всем активным WebSocket-соединениям.
+#### 5. **Improved Caching Mechanism**
+   - **Purpose**: To optimize performance for static files.
+   - **Details**:
+     - Implemented an in-memory cache (`cacheEntry`) to store file content, modification times, and metadata.
+     - Cache invalidation occurs when file modifications are detected on disk.
+   - **Benefits**:
+     - Faster response times for frequently accessed files.
+     - Reduced disk I/O overhead.
 
-### Исправлено
-- Исправлена проблема с неиспользуемой переменной `query` в коде обработки rewrite rules.
-- Устранена утечка памяти при работе с большими файлами в кэше.
-- Исправлена обработка некорректных заголовков CORS.
-- Устранены ошибки при запуске Node.js приложений с неправильными путями.
+#### 6. **WebSocket Support**
+   - **Purpose**: To enable real-time communication for modern web applications.
+   - **Details**:
+     - Integrated the Gorilla WebSocket library for handling WebSocket connections.
+     - Added a WebSocket upgrader with configurable buffer sizes and origin validation.
+   - **Benefits**:
+     - Support for real-time features such as chat applications and live updates.
+     - Flexible configuration for WebSocket behavior.
 
-### Удалено
-- Удалены устаревшие функции для работы с прокси, замененные более эффективными решениями.
-- Убраны неиспользуемые зависимости из `go.mod`.
+#### 7. **Anti-DDoS Protection**
+   - **Purpose**: To mitigate DDoS attacks and prevent abuse.
+   - **Details**:
+     - Integrated the `AntiDDoS` module to limit the number of requests per second from a single IP address.
+     - Configurable parameters include `MaxRequestsPerSecond` and `BlockDuration`.
+   - **Benefits**:
+     - Reduced risk of server overload during high-traffic scenarios.
+     - Improved stability and availability.
 
-### Безопасность
-- Добавлена защита от атак path traversal с использованием строгой валидации путей.
-- Улучшена обработка заголовков `Host` для предотвращения атак типа Host Header Injection.
-- Настроено использование безопасных значений для заголовков `Content-Type` и `Content-Disposition`.
+#### 8. **Prometheus Metrics**
+   - **Purpose**: To provide insights into server performance and usage.
+   - **Details**:
+     - Added Prometheus metrics for tracking HTTP requests, active connections, and request durations.
+     - Metrics are exposed via the `/metrics` endpoint for integration with monitoring tools.
+   - **Benefits**:
+     - Enhanced observability for server health and performance.
+     - Simplified debugging and capacity planning.
 
-## [1.3] - 2025-04-27
+#### 9. **Error Handling and Logging**
+   - **Purpose**: To improve user experience and simplify troubleshooting.
+   - **Details**:
+     - Added custom error pages for HTTP errors (e.g., 403, 404, 500).
+     - Enhanced logging with unique request IDs, timestamps, and detailed metadata.
+   - **Benefits**:
+     - Improved clarity for end-users encountering errors.
+     - Simplified debugging for administrators.
 
-### Добавлено
-- **Защита от DDoS-атак**:
-  - Добавлена защита от DDoS-атак с настраиваемыми параметрами, такими как максимальное количество запросов в секунду (`AntiDDoSMaxRequestsPerSecond`) и длительность блокировки (`AntiDDoSBlockDuration`).
-  - Реализован механизм блокировки IP-адресов, превышающих допустимый лимит запросов.
-- **Поддержка WebSocket**:
-  - Добавлена поддержка WebSocket-соединений с возможностью обработки сообщений в реальном времени.
-  - Реализован базовый эхо-сервер для тестирования WebSocket.
-- **Динамическая перезагрузка конфигурации**:
-  - Улучшена обработка сигнала `SIGHUP` для перезагрузки конфигурации без перезапуска сервера.
-- **Логирование**:
-  - Обновлен формат логов для более удобного анализа (JSON).
-  - Добавлены уникальные идентификаторы запросов (`X-Request-ID`) для трассировки.
-- **Ограничение скорости запросов**:
-  - Добавлена поддержка настройки ограничения скорости запросов для каждого виртуального хоста.
-- **Механизм fallback для SPA**:
-  - Улучшен механизм fallback для Single Page Applications (SPA), позволяющий корректно обслуживать маршруты фронтенда.
+#### 10. **SPA Fallback Support**
 
-### Изменено
-- **Рефакторинг кода**:
-  - Проведен рефакторинг кода для улучшения читаемости и поддержки.
-  - Удалены неиспользуемые импорты и исправлены предупреждения компилятора.
-- **Обработка конфигурации**:
-  - Улучшена обработка ошибок при загрузке конфигурации.
-  - Добавлена проверка корректности путей к файлам и директориям.
-- **Middleware**:
-  - Оптимизированы middleware для логирования, метрик и восстановления после паники.
+   - **Purpose**: To handle routing for Single Page Applications (SPAs).
+   - **Details**:
+     - Added logic to serve `index.html` for unmatched routes in SPAs.
+     - Supports frameworks like React, Angular, and Vue.js.
+   - **Benefits**:
+     - Seamless integration with modern frontend frameworks.
 
-### Исправлено
-- Исправлена работа с путями файлов при использовании разных операционных систем (Windows/Linux).
-- Устранены проблемы с лишними запятыми в логах и конфигурационных файлах.
-- Исправлена обработка ошибок при загрузке SSL-сертификатов.
+---
 
-### Удалено
-- Удалены устаревшие комментарии и неиспользуемые переменные.
+### Removed Features
 
-### Безопасность
-- Добавлена дополнительная проверка заголовков запросов для защиты от потенциальных атак.
-- Улучшена обработка больших файлов и запросов для предотвращения переполнения памяти.
+- Static `.ini` configuration files: Replaced with MySQL-based configuration.
+- Legacy proxy functions: Replaced with more efficient solutions.
 
-### Известные проблемы
-- При высокой нагрузке возможны задержки в обработке запросов, если не настроены оптимальные параметры Anti-DDoS.
-- Если файл конфигурации содержит ошибки, сервер может не запуститься. Убедитесь в корректности `.ini` файла перед запуском.
+### Known Issues
+
+- High traffic loads may cause delays if Anti-DDoS parameters are not optimally configured.
+- Missing or incorrect SSL certificates in the database may result in HTTPS failures.
+
+### Future Work
+
+- Add support for HTTP/3 and QUIC protocols.
+- Implement additional security features, such as rate limiting for specific endpoints.
+- Enhance the database schema to support advanced routing rules and middleware configurations.
