@@ -89,21 +89,18 @@ func main() {
 		fmt.Println("Failed to initialize logger")
 		os.Exit(1)
 	}
-
 	// Load configuration
 	config := loadConfiguration(ConfigDir, logger)
 	if config == nil {
 		logger.Error("Failed to load configuration", nil)
 		os.Exit(1)
 	}
-
 	// Initialize AntiDDoS
 	defaultConfig := &antiddos.AntiDDoSConfig{
 		MaxRequestsPerSecond: 100,
 		BlockDuration:        60 * time.Second,
 	}
 	antiDDoS := antiddos.NewAntiDDoS(defaultConfig, logger)
-
 	// Initialize server
 	server := &GubinNET{
 		config:   config,
@@ -111,10 +108,8 @@ func main() {
 		cache:    make(map[string]*cacheEntry),
 		antiDDoS: antiDDoS,
 	}
-
 	// Start server
 	server.Start()
-
 	// Handle OS signals
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
@@ -220,7 +215,6 @@ func parseVirtualHost(filePath string) (*VirtualHost, error) {
 // Start the server
 func (g *GubinNET) Start() {
 	g.logger.Info("Starting server", nil)
-
 	// Start HTTP server
 	go func() {
 		httpServer := &http.Server{
@@ -235,7 +229,6 @@ func (g *GubinNET) Start() {
 			g.logger.Error("HTTP server error", map[string]interface{}{"error": err})
 		}
 	}()
-
 	// Start HTTPS server with SNI support
 	go func() {
 		certMap := make(map[string]tls.Certificate)
@@ -286,25 +279,21 @@ func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
 		duration := time.Since(start).Seconds()
 		requestDuration.WithLabelValues(r.Method, r.URL.Path).Observe(duration)
 	}(time.Now())
-
 	// Generate unique Request ID
 	requestID := uuid.New().String()
 	w.Header().Set("X-Request-ID", requestID)
-
 	hostHeader := strings.Split(strings.TrimSuffix(r.Host, ";"), ":")[0]
 	host, exists := g.config.VirtualHosts[hostHeader]
 	if !exists || host.Root == "" {
 		g.serveHostNotFoundPage(w, r, requestID)
 		return
 	}
-
 	// Redirect to HTTPS
 	if host.RedirectToHTTPS && r.TLS == nil {
 		url := "https://" + hostHeader + r.URL.String()
 		http.Redirect(w, r, url, http.StatusPermanentRedirect)
 		return
 	}
-
 	g.serveFileOrSpa(w, r, host, requestID)
 }
 
@@ -315,10 +304,22 @@ func (g *GubinNET) serveFileOrSpa(w http.ResponseWriter, r *http.Request, host *
 		g.serveErrorPage(w, r, http.StatusInternalServerError, "Server configuration error", "", requestID)
 		return
 	}
-
 	requestPath := filepath.Clean(strings.TrimLeft(r.URL.Path, "/"))
 	fullPath := filepath.Join(webRootPath, requestPath)
 	fileInfo, err := os.Stat(fullPath)
+
+	// Check for index.html in directories
+	if err == nil && fileInfo.IsDir() {
+		indexFiles := []string{"index.html", "index.htm", "default.htm"}
+		for _, index := range indexFiles {
+			indexPath := filepath.Join(fullPath, index)
+			if stat, err := os.Stat(indexPath); err == nil && !stat.IsDir() {
+				fullPath = indexPath
+				fileInfo = stat
+				break
+			}
+		}
+	}
 
 	if err == nil && !fileInfo.IsDir() {
 		// Handle PHP
@@ -326,10 +327,19 @@ func (g *GubinNET) serveFileOrSpa(w http.ResponseWriter, r *http.Request, host *
 			g.handlePHP(w, r, fullPath, requestID)
 			return
 		}
+		// Handle .NET applications
+		if strings.HasSuffix(fullPath, ".aspx") || strings.HasSuffix(fullPath, ".cshtml") {
+			g.handleDotNet(w, r, fullPath, requestID)
+			return
+		}
+		// Handle Node.js applications
+		if strings.HasSuffix(fullPath, ".js") {
+			g.handleNodeJS(w, r, fullPath, requestID)
+			return
+		}
 		g.serveFile(w, r, fullPath, fileInfo, requestID)
 		return
 	}
-
 	if len(host.TryFiles) > 0 {
 		for _, tryFile := range host.TryFiles {
 			tryPath := filepath.Join(webRootPath, strings.Replace(tryFile, "$uri", requestPath, 1))
@@ -339,7 +349,11 @@ func (g *GubinNET) serveFileOrSpa(w http.ResponseWriter, r *http.Request, host *
 			}
 		}
 	}
-
+	// Proxy if proxy_url is set
+	if host.ProxyURL != "" {
+		g.handleProxy(w, r, host.ProxyURL, requestID)
+		return
+	}
 	g.serveErrorPage(w, r, http.StatusNotFound, "File Not Found", fmt.Sprintf("File '%s' does not exist in root path '%s'", requestPath, webRootPath), requestID)
 }
 
@@ -366,6 +380,104 @@ func (g *GubinNET) handlePHP(w http.ResponseWriter, r *http.Request, filePath st
 			"request_id": requestID,
 		})
 		g.serveErrorPage(w, r, http.StatusInternalServerError, "Internal Server Error", "", requestID)
+	}
+}
+
+// Handle .NET applications
+func (g *GubinNET) handleDotNet(w http.ResponseWriter, r *http.Request, filePath string, requestID string) {
+	cmd := exec.Command("dotnet", filePath)
+	env := map[string]string{
+		"ASPNETCORE_URLS":        "http://localhost:5000",
+		"ASPNETCORE_ENVIRONMENT": "Production",
+		"REQUEST_METHOD":         r.Method,
+		"QUERY_STRING":           r.URL.RawQuery,
+		"REMOTE_ADDR":            getRealIP(r),
+	}
+	cmd.Env = append(os.Environ(), envToEnvSlice(env)...)
+	cmd.Stdin = r.Body
+	cmd.Stdout = w
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		g.logErrorWithStackTrace("Failed to execute .NET application", map[string]interface{}{
+			"error":      err,
+			"path":       filePath,
+			"request_id": requestID,
+		})
+		g.serveErrorPage(w, r, http.StatusInternalServerError, "Internal Server Error", "", requestID)
+	}
+}
+
+// Handle Node.js applications
+func (g *GubinNET) handleNodeJS(w http.ResponseWriter, r *http.Request, filePath string, requestID string) {
+	cmd := exec.Command("node", filePath)
+	env := map[string]string{
+		"NODE_ENV":       "production",
+		"REQUEST_METHOD": r.Method,
+		"QUERY_STRING":   r.URL.RawQuery,
+		"REMOTE_ADDR":    getRealIP(r),
+	}
+	cmd.Env = append(os.Environ(), envToEnvSlice(env)...)
+	cmd.Stdin = r.Body
+	cmd.Stdout = w
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		g.logErrorWithStackTrace("Failed to execute Node.js application", map[string]interface{}{
+			"error":      err,
+			"path":       filePath,
+			"request_id": requestID,
+		})
+		g.serveErrorPage(w, r, http.StatusInternalServerError, "Internal Server Error", "", requestID)
+	}
+}
+
+// Handle proxying
+func (g *GubinNET) handleProxy(w http.ResponseWriter, r *http.Request, proxyURL string, requestID string) {
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+	}
+	req, err := http.NewRequest(r.Method, proxyURL+r.URL.String(), r.Body)
+	if err != nil {
+		g.logErrorWithStackTrace("Failed to create proxy request", map[string]interface{}{
+			"error":      err,
+			"url":        proxyURL,
+			"request_id": requestID,
+		})
+		g.serveErrorPage(w, r, http.StatusInternalServerError, "Internal Server Error", "", requestID)
+		return
+	}
+	// Copy headers
+	for key, values := range r.Header {
+		for _, value := range values {
+			req.Header.Add(key, value)
+		}
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		g.logErrorWithStackTrace("Failed to proxy request", map[string]interface{}{
+			"error":      err,
+			"url":        proxyURL,
+			"request_id": requestID,
+		})
+		g.serveErrorPage(w, r, http.StatusBadGateway, "Bad Gateway", "", requestID)
+		return
+	}
+	defer resp.Body.Close()
+	// Copy response
+	for key, values := range resp.Header {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	buf := make([]byte, 4096)
+	for {
+		n, err := resp.Body.Read(buf)
+		if n > 0 {
+			w.Write(buf[:n])
+		}
+		if err != nil {
+			break
+		}
 	}
 }
 
