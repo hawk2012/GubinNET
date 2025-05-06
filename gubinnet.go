@@ -475,7 +475,7 @@ func (g *GubinNET) handlePHP(w http.ResponseWriter, r *http.Request, filePath st
 	cmd := exec.Command("php-cgi")
 	env := map[string]string{
 		"SCRIPT_FILENAME":   filePath,
-		"SERVER_SOFTWARE":   "GubinNET/1.5",
+		"SERVER_SOFTWARE":   "GubinNET/1.5.1",
 		"GATEWAY_INTERFACE": "CGI/1.1",
 		"REQUEST_METHOD":    r.Method,
 		"QUERY_STRING":      r.URL.RawQuery,
@@ -799,7 +799,7 @@ func (g *GubinNET) serveErrorPage(w http.ResponseWriter, r *http.Request, status
     <h1>Error %d</h1>
     <p>%s</p>
     <p>Details: %s</p>
-    <p>Server: GubinNET/1.5</p>
+    <p>Server: GubinNET/1.5.1</p>
     <p>Request ID: %s</p>
 </body>
 </html>
@@ -834,7 +834,7 @@ func (g *GubinNET) serveHostNotFoundPage(w http.ResponseWriter, r *http.Request,
 <body>
     <h1>Host Not Found</h1>
     <p>The requested host could not be found on this server.</p>
-    <p>Server: GubinNET/1.5</p>
+    <p>Server: GubinNET/1.5.1</p>
 </body>
 </html>
 `
