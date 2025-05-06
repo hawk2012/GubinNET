@@ -3,7 +3,7 @@
 setlocal
 
 :: Определяем пути
-set PROJECT_DIR=E:\data\YandexDisk\Protek\src\GubinNET
+set PROJECT_DIR=E:\data\YandexDisk\src\GubinNET
 set RELEASE_DIR=E:\data\YandexDisk\gubinnet-release\Windows
 
 :: Создаем директорию для релизов, если она не существует
