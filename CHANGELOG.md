@@ -1,104 +1,45 @@
 # Changelog
 
-## [1.5] - 2025-05-05
+All notable changes to the GubinNET project will be documented in this file.
 
-### Overview
-This release marks a significant improvement in the architecture of GubinNET. The server has been refactored to enhance flexibility, scalability, and ease of management for hosting multiple virtual hosts and configurations.
+## [1.5.1] - 2025-06-05
 
-### Key Changes
+### Added
+- **AntiDDoS Integration**: Added AntiDDoS middleware for protection against excessive requests with configurable limits and block durations.
+- **Prometheus Metrics**: Integrated Prometheus metrics for monitoring HTTP request counts, durations, and active connections.
+- **Graceful Shutdown**: Implemented graceful shutdown mechanisms for both HTTP and HTTPS servers.
+- **SNI Support**: Enabled SNI (Server Name Indication) support for serving multiple SSL certificates dynamically.
+- **Caching Mechanism**: Introduced an in-memory caching system for static files to improve performance.
+- **Configuration Reloading**: Added support for reloading configuration on-the-fly via `SIGHUP` signal.
+- **Proxy Support**: Implemented reverse proxy capabilities for virtual hosts with a `proxy_url` configuration.
+- **Security Middleware**: Enhanced security by blocking suspicious request patterns such as `.env`, `/shell`, and others.
 
-#### 1. **Static INI Configuration Files**
-   - **Purpose**: To manage virtual host configurations in a simple and structured format.
-   - **Details**:
-     - Virtual hosts are defined in `.ini` files located in `/etc/gubinnet/config`.
-     - Each file contains key-value pairs for settings such as `server_name`, `listen_port`, `root_path`, and `use_ssl`.
-     - Configurations can be reloaded dynamically using the `SIGHUP` signal without restarting the server.
-   - **Benefits**:
-     - Simplified management of multiple virtual hosts.
-     - Real-time updates to configurations without downtime.
+### Changed
+- **Logger Enhancements**: Updated logger to support JSONB format with optional gzip compression for log files.
+- **Middleware Refactoring**: Reorganized middleware stack to include metrics, logging, and security layers.
+- **Error Handling**: Improved error handling and reporting for invalid configurations, missing files, and server errors.
+- **Virtual Host Management**: Simplified virtual host updates during configuration reloads by directly modifying fields instead of using `updateConfig`.
 
-#### 2. **Dynamic SSL Certificate Loading with SNI**
-   - **Purpose**: To support multiple SSL certificates for different domains on the same server.
-   - **Details**:
-     - Implemented Server Name Indication (SNI) to dynamically load SSL certificates based on the requested hostname.
-     - Certificates and private keys are stored in the `cert_path` and `key_path` fields of the `.ini` configuration files.
-     - HTTPS server listens on port 443 and uses the `GetCertificate` function to fetch the appropriate certificate for each request.
-   - **Benefits**:
-     - Enhanced security with domain-specific SSL certificates.
-     - Simplified management of SSL configurations.
+### Fixed
+- **Assignment Mismatch**: Resolved mismatch in variable assignments when initializing AntiDDoS.
+- **Argument Count Errors**: Fixed argument count mismatches in calls to `antiddos.NewAntiDDoS`.
+- **Undefined Methods**: Removed usage of undefined methods like `updateConfig` from the `VirtualHost` structure.
+- **Static File Serving**: Corrected issues with serving index files (`index.html`, `index.htm`) in directories.
+- **ETag and Last-Modified Headers**: Ensured proper handling of `ETag` and `Last-Modified` headers for cached responses.
 
-#### 3. **Automatic HTTP → HTTPS Redirection**
-   - **Purpose**: To enforce secure connections for configured domains.
-   - **Details**:
-     - Added a `redirect_to_https` flag in the `.ini` configuration files to enable or disable automatic redirection from HTTP to HTTPS.
-     - Requests to HTTP are redirected to HTTPS if the `redirect_to_https` flag is set to `TRUE`.
-   - **Benefits**:
-     - Improved security by ensuring all traffic is encrypted.
-     - Simplified enforcement of HTTPS policies.
+### Removed
+- **Unused Methods**: Removed unused or redundant methods such as `updateConfig` from the `VirtualHost` structure.
+- **Deprecated Configurations**: Cleaned up deprecated or unused configuration parameters.
 
-#### 4. **Enhanced Security Middleware**
-   - **Purpose**: To protect against malicious requests and common vulnerabilities.
-   - **Details**:
-     - Added middleware to block suspicious patterns such as `.env`, `/shell`, and `/wordpress/wp-admin/setup-config.php`.
-     - Logs blocked requests with detailed information, including IP addresses and paths.
-   - **Benefits**:
-     - Reduced risk of unauthorized access and attacks.
-     - Improved logging for security audits.
+### Security
+- **Blocked Patterns**: Added common attack patterns to the security middleware to prevent unauthorized access.
+- **TLS Configuration**: Enforced minimum TLS version 1.2 for secure connections.
+- **IP Tracking**: Implemented IP-based request tracking and blocking for DDoS protection.
 
-#### 5. **Improved Caching Mechanism**
-   - **Purpose**: To optimize performance for static files.
-   - **Details**:
-     - Implemented an in-memory cache (`cacheEntry`) to store file content, modification times, and metadata.
-     - Cache invalidation occurs when file modifications are detected on disk.
-   - **Benefits**:
-     - Faster response times for frequently accessed files.
-     - Reduced disk I/O overhead.
-
-#### 6. **Anti-DDoS Protection**
-   - **Purpose**: To mitigate DDoS attacks and prevent abuse.
-   - **Details**:
-     - Integrated the `AntiDDoS` module to limit the number of requests per second from a single IP address.
-     - Configurable parameters include `MaxRequestsPerSecond` and `BlockDuration`.
-   - **Benefits**:
-     - Reduced risk of server overload during high-traffic scenarios.
-     - Improved stability and availability.
-
-#### 7. **Prometheus Metrics**
-   - **Purpose**: To provide insights into server performance and usage.
-   - **Details**:
-     - Added Prometheus metrics for tracking HTTP requests, active connections, and request durations.
-     - Metrics are exposed via the `/metrics` endpoint for integration with monitoring tools.
-   - **Benefits**:
-     - Enhanced observability for server health and performance.
-     - Simplified debugging and capacity planning.
-
-#### 8. **Error Handling and Logging**
-   - **Purpose**: To improve user experience and simplify troubleshooting.
-   - **Details**:
-     - Added custom error pages for HTTP errors (e.g., 403, 404, 500).
-     - Enhanced logging with unique request IDs, timestamps, and detailed metadata.
-   - **Benefits**:
-     - Improved clarity for end-users encountering errors.
-     - Simplified debugging for administrators.
-
-#### 9. **SPA Fallback Support**
-   - **Purpose**: To handle routing for Single Page Applications (SPAs).
-   - **Details**:
-     - Added logic to serve `index.html` for unmatched routes in SPAs.
-     - Supports frameworks like React, Angular, and Vue.js.
-   - **Benefits**:
-     - Seamless integration with modern frontend frameworks.
+### Documentation
+- **Code Comments**: Added detailed inline comments for better code readability and maintainability.
+- **Configuration Guide**: Updated documentation to include new configuration options and their usage.
 
 ---
 
-### Known Issues
-
-- High traffic loads may cause delays if Anti-DDoS parameters are not optimally configured.
-- Missing or incorrect SSL certificates in the `.ini` files may result in HTTPS failures.
-
-### Future Work
-
-- Migrate configuration management from `.ini` files to a MySQL database backend.
-- Add WebSocket support using the Gorilla WebSocket library.
-- Implement HTTP/3 and QUIC protocols for improved performance.
-- Enhance security features, such as rate limiting for specific endpoints.
+This release focuses on improving stability, security, and performance while ensuring seamless integration with modern monitoring tools like Prometheus. For more details, refer to the source code and documentation.

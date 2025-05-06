@@ -7,10 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,13 +35,11 @@ var (
 		Name: "http_requests_total",
 		Help: "Total number of HTTP requests",
 	}, []string{"method", "path", "status"})
-
 	requestDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "http_request_duration_seconds",
 		Help:    "Duration of HTTP requests",
 		Buckets: []float64{0.1, 0.5, 1, 2.5, 5, 10},
 	}, []string{"method", "path"})
-
 	activeConnections = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "http_active_connections",
 		Help: "Number of active HTTP connections",
@@ -94,20 +90,24 @@ func main() {
 		fmt.Println("Failed to initialize logger")
 		os.Exit(1)
 	}
-
 	// Load configuration
 	config := loadConfiguration(ConfigDir, logger)
 	if config == nil {
 		logger.Error("Failed to load configuration", nil)
 		os.Exit(1)
 	}
-
 	// Initialize AntiDDoS
 	defaultConfig := &antiddos.AntiDDoSConfig{
 		MaxRequestsPerSecond: 100,
 		BlockDuration:        60 * time.Second,
+		LogFilePath:          filepath.Join(LogDir, "antiddos.log"),
 	}
-	antiDDoS := antiddos.NewAntiDDoS(defaultConfig, logger)
+	antiDDoS, err := antiddos.NewAntiDDoS(defaultConfig)
+	if err != nil {
+		logger.Error("Failed to initialize AntiDDoS", map[string]interface{}{"error": err})
+		os.Exit(1)
+	}
+	defer antiDDoS.Close()
 
 	// Initialize server
 	server := &GubinNET{
@@ -117,14 +117,11 @@ func main() {
 		antiDDoS: antiDDoS,
 		servers:  make(map[string]*http.Server),
 	}
-
 	// Start server
 	server.Start()
-
 	// Handle OS signals
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
-
 	for sig := range sigChan {
 		switch sig {
 		case syscall.SIGHUP:
@@ -187,7 +184,7 @@ func parseVirtualHost(filePath string) (*VirtualHost, error) {
 	if err != nil {
 		return nil, err
 	}
-	lines := strings.Split(string(data), "\n") // Исправлено форматирование строки
+	lines := strings.Split(string(data), "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -229,17 +226,24 @@ func parseVirtualHost(filePath string) (*VirtualHost, error) {
 func (g *GubinNET) applyNewConfig(newConfig *ConfigParser) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-
 	// Update existing hosts
 	for serverName, newHost := range newConfig.VirtualHosts {
 		if existingHost, exists := g.config.VirtualHosts[serverName]; exists {
-			existingHost.updateConfig(newHost)
+			existingHost.ServerName = newHost.ServerName
+			existingHost.ListenPort = newHost.ListenPort
+			existingHost.Root = newHost.Root
+			existingHost.Index = newHost.Index
+			existingHost.TryFiles = newHost.TryFiles
+			existingHost.UseSSL = newHost.UseSSL
+			existingHost.CertPath = newHost.CertPath
+			existingHost.KeyPath = newHost.KeyPath
+			existingHost.RedirectToHTTPS = newHost.RedirectToHTTPS
+			existingHost.ProxyURL = newHost.ProxyURL
 		} else {
 			g.config.VirtualHosts[serverName] = newHost
 			g.startVirtualHost(newHost)
 		}
 	}
-
 	// Remove hosts that are not in the new configuration
 	for serverName := range g.config.VirtualHosts {
 		if _, exists := newConfig.VirtualHosts[serverName]; !exists {
@@ -273,7 +277,6 @@ func (g *GubinNET) startVirtualHost(host *VirtualHost) {
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
-
 	if host.UseSSL {
 		cert, err := tls.LoadX509KeyPair(host.CertPath, host.KeyPath)
 		if err == nil {
@@ -283,11 +286,9 @@ func (g *GubinNET) startVirtualHost(host *VirtualHost) {
 			}
 		}
 	}
-
 	g.mu.Lock()
 	g.servers[host.ServerName] = server
 	g.mu.Unlock()
-
 	go func() {
 		var err error
 		if host.UseSSL {
@@ -295,7 +296,6 @@ func (g *GubinNET) startVirtualHost(host *VirtualHost) {
 		} else {
 			err = server.ListenAndServe()
 		}
-
 		if err != nil && err != http.ErrServerClosed {
 			g.logger.Error("Server error", map[string]interface{}{
 				"server_name": host.ServerName,
@@ -313,7 +313,6 @@ func (g *GubinNET) stopVirtualHost(serverName string) {
 		delete(g.servers, serverName)
 	}
 	g.mu.Unlock()
-
 	if exists {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -338,7 +337,6 @@ func (g *GubinNET) Start() {
 			g.logger.Error("HTTP server error", map[string]interface{}{"error": err})
 		}
 	}()
-
 	// Start HTTPS server with SNI support
 	go func() {
 		certMap := make(map[string]tls.Certificate)
@@ -389,25 +387,21 @@ func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
 		duration := time.Since(start).Seconds()
 		requestDuration.WithLabelValues(r.Method, r.URL.Path).Observe(duration)
 	}(time.Now())
-
 	// Generate unique Request ID
 	requestID := uuid.New().String()
 	w.Header().Set("X-Request-ID", requestID)
-
 	hostHeader := strings.Split(strings.TrimSuffix(r.Host, ";"), ":")[0]
 	host, exists := g.config.VirtualHosts[hostHeader]
 	if !exists || host.Root == "" {
 		g.serveHostNotFoundPage(w, r, requestID)
 		return
 	}
-
 	// Redirect to HTTPS
 	if host.RedirectToHTTPS && r.TLS == nil {
 		url := "https://" + hostHeader + r.URL.String()
 		http.Redirect(w, r, url, http.StatusPermanentRedirect)
 		return
 	}
-
 	g.serveFileOrSpa(w, r, host, requestID)
 }
 
@@ -421,7 +415,6 @@ func (g *GubinNET) serveFileOrSpa(w http.ResponseWriter, r *http.Request, host *
 	requestPath := filepath.Clean(strings.TrimLeft(r.URL.Path, "/"))
 	fullPath := filepath.Join(webRootPath, requestPath)
 	fileInfo, err := os.Stat(fullPath)
-
 	// Check for index.html in directories
 	if err == nil && fileInfo.IsDir() {
 		indexFiles := []string{"index.html", "index.htm", "default.htm"}
@@ -435,21 +428,6 @@ func (g *GubinNET) serveFileOrSpa(w http.ResponseWriter, r *http.Request, host *
 		}
 	}
 	if err == nil && !fileInfo.IsDir() {
-		// Handle PHP
-		if strings.HasSuffix(fullPath, ".php") {
-			g.handlePHP(w, r, fullPath, requestID)
-			return
-		}
-		// Handle .NET applications
-		if strings.HasSuffix(fullPath, ".aspx") || strings.HasSuffix(fullPath, ".cshtml") {
-			g.handleDotNet(w, r, fullPath, requestID)
-			return
-		}
-		// Handle Node.js applications
-		if strings.HasSuffix(fullPath, ".js") {
-			g.handleNodeJS(w, r, fullPath, requestID)
-			return
-		}
 		g.serveFile(w, r, fullPath, fileInfo, requestID)
 		return
 	}
@@ -470,79 +448,6 @@ func (g *GubinNET) serveFileOrSpa(w http.ResponseWriter, r *http.Request, host *
 	g.serveErrorPage(w, r, http.StatusNotFound, "File Not Found", fmt.Sprintf("File '%s' does not exist in root path '%s'", requestPath, webRootPath), requestID)
 }
 
-// Handle PHP via FastCGI
-func (g *GubinNET) handlePHP(w http.ResponseWriter, r *http.Request, filePath string, requestID string) {
-	cmd := exec.Command("php-cgi")
-	env := map[string]string{
-		"SCRIPT_FILENAME":   filePath,
-		"SERVER_SOFTWARE":   "GubinNET/1.5.1",
-		"GATEWAY_INTERFACE": "CGI/1.1",
-		"REQUEST_METHOD":    r.Method,
-		"QUERY_STRING":      r.URL.RawQuery,
-		"REMOTE_ADDR":       getRealIP(r),
-		"REDIRECT_STATUS":   "200",
-	}
-	cmd.Env = append(os.Environ(), envToEnvSlice(env)...)
-	cmd.Stdin = r.Body
-	cmd.Stdout = w
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		g.logErrorWithStackTrace("Failed to execute PHP-CGI", map[string]interface{}{
-			"error":      err,
-			"path":       filePath,
-			"request_id": requestID,
-		})
-		g.serveErrorPage(w, r, http.StatusInternalServerError, "Internal Server Error", "", requestID)
-	}
-}
-
-// Handle .NET applications
-func (g *GubinNET) handleDotNet(w http.ResponseWriter, r *http.Request, filePath string, requestID string) {
-	cmd := exec.Command("dotnet", filePath)
-	env := map[string]string{
-		"ASPNETCORE_URLS":        "http://localhost:5000",
-		"ASPNETCORE_ENVIRONMENT": "Production",
-		"REQUEST_METHOD":         r.Method,
-		"QUERY_STRING":           r.URL.RawQuery,
-		"REMOTE_ADDR":            getRealIP(r),
-	}
-	cmd.Env = append(os.Environ(), envToEnvSlice(env)...)
-	cmd.Stdin = r.Body
-	cmd.Stdout = w
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		g.logErrorWithStackTrace("Failed to execute .NET application", map[string]interface{}{
-			"error":      err,
-			"path":       filePath,
-			"request_id": requestID,
-		})
-		g.serveErrorPage(w, r, http.StatusInternalServerError, "Internal Server Error", "", requestID)
-	}
-}
-
-// Handle Node.js applications
-func (g *GubinNET) handleNodeJS(w http.ResponseWriter, r *http.Request, filePath string, requestID string) {
-	cmd := exec.Command("node", filePath)
-	env := map[string]string{
-		"NODE_ENV":       "production",
-		"REQUEST_METHOD": r.Method,
-		"QUERY_STRING":   r.URL.RawQuery,
-		"REMOTE_ADDR":    getRealIP(r),
-	}
-	cmd.Env = append(os.Environ(), envToEnvSlice(env)...)
-	cmd.Stdin = r.Body
-	cmd.Stdout = w
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		g.logErrorWithStackTrace("Failed to execute Node.js application", map[string]interface{}{
-			"error":      err,
-			"path":       filePath,
-			"request_id": requestID,
-		})
-		g.serveErrorPage(w, r, http.StatusInternalServerError, "Internal Server Error", "", requestID)
-	}
-}
-
 // Handle proxying
 func (g *GubinNET) handleProxy(w http.ResponseWriter, r *http.Request, proxyURL string, requestID string) {
 	client := &http.Client{
@@ -550,11 +455,6 @@ func (g *GubinNET) handleProxy(w http.ResponseWriter, r *http.Request, proxyURL 
 	}
 	req, err := http.NewRequest(r.Method, proxyURL+r.URL.String(), r.Body)
 	if err != nil {
-		g.logErrorWithStackTrace("Failed to create proxy request", map[string]interface{}{
-			"error":      err,
-			"url":        proxyURL,
-			"request_id": requestID,
-		})
 		g.serveErrorPage(w, r, http.StatusInternalServerError, "Internal Server Error", "", requestID)
 		return
 	}
@@ -566,11 +466,6 @@ func (g *GubinNET) handleProxy(w http.ResponseWriter, r *http.Request, proxyURL 
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		g.logErrorWithStackTrace("Failed to proxy request", map[string]interface{}{
-			"error":      err,
-			"url":        proxyURL,
-			"request_id": requestID,
-		})
 		g.serveErrorPage(w, r, http.StatusBadGateway, "Bad Gateway", "", requestID)
 		return
 	}
@@ -615,7 +510,7 @@ func (g *GubinNET) securityMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		for _, pattern := range blockedPatterns {
 			if strings.Contains(path, pattern) {
 				ip := getRealIP(r)
-				g.logErrorWithStackTrace("Blocked suspicious request", map[string]interface{}{
+				g.logger.Warning("Blocked suspicious request", map[string]interface{}{
 					"path":       path,
 					"ip":         ip,
 					"request_id": w.Header().Get("X-Request-ID"),
@@ -671,14 +566,6 @@ func getRealIP(r *http.Request) string {
 	return ip
 }
 
-func envToEnvSlice(env map[string]string) []string {
-	var envSlice []string
-	for key, value := range env {
-		envSlice = append(envSlice, fmt.Sprintf("%s=%s", key, value))
-	}
-	return envSlice
-}
-
 // Response Writer Wrapper
 type responseWriterWrapper struct {
 	w      http.ResponseWriter
@@ -713,22 +600,12 @@ func (g *GubinNET) serveFile(w http.ResponseWriter, r *http.Request, filePath st
 			var err error
 			fileInfo, err = os.Stat(filePath)
 			if err != nil {
-				g.logErrorWithStackTrace("Failed to stat file", map[string]interface{}{
-					"error":      err,
-					"path":       filePath,
-					"request_id": requestID,
-				})
 				g.serveErrorPage(w, r, http.StatusInternalServerError, "Internal Server Error", "", requestID)
 				return
 			}
 		}
 		content, err := os.ReadFile(filePath)
 		if err != nil {
-			g.logErrorWithStackTrace("Failed to read file", map[string]interface{}{
-				"error":      err,
-				"path":       filePath,
-				"request_id": requestID,
-			})
 			g.serveErrorPage(w, r, http.StatusInternalServerError, "Internal Server Error", "", requestID)
 			return
 		}
@@ -770,7 +647,7 @@ func (g *GubinNET) serveFile(w http.ResponseWriter, r *http.Request, filePath st
 
 // Serve Error Page
 func (g *GubinNET) serveErrorPage(w http.ResponseWriter, r *http.Request, statusCode int, message string, details string, requestID string) {
-	g.logErrorWithStackTrace("Error page served", map[string]interface{}{
+	g.logger.Error("Error page served", map[string]interface{}{
 		"path":       r.URL.Path,
 		"method":     r.Method,
 		"status":     statusCode,
@@ -809,7 +686,7 @@ func (g *GubinNET) serveErrorPage(w http.ResponseWriter, r *http.Request, status
 
 // Serve Host Not Found Page
 func (g *GubinNET) serveHostNotFoundPage(w http.ResponseWriter, r *http.Request, requestID string) {
-	g.logErrorWithStackTrace("Host not found page served", map[string]interface{}{
+	g.logger.Error("Host not found page served", map[string]interface{}{
 		"path":       r.URL.Path,
 		"method":     r.Method,
 		"remote":     r.RemoteAddr,
@@ -859,44 +736,7 @@ func getContentType(filePath string) string {
 		return "image/jpeg"
 	case ".gif":
 		return "image/gif"
-	case ".php":
-		return "text/html; charset=utf-8"
 	default:
 		return "application/octet-stream"
 	}
-}
-
-// Log Error with Stack Trace
-func (g *GubinNET) logErrorWithStackTrace(message string, fields map[string]interface{}) {
-	stackTrace := getStackTrace(2)
-	fields["stack_trace"] = stackTrace
-	g.logger.Error(message, fields)
-}
-
-// Get Stack Trace
-func getStackTrace(skip int) string {
-	var stackTrace strings.Builder
-	for i := skip; ; i++ {
-		pc, file, line, ok := runtime.Caller(i)
-		if !ok {
-			break
-		}
-		funcName := runtime.FuncForPC(pc).Name()
-		stackTrace.WriteString(fmt.Sprintf("File: %s, Line: %d, Function: %s\n", file, line, funcName))
-	}
-	return stackTrace.String()
-}
-
-// Helper method for updating host configuration
-func (v *VirtualHost) updateConfig(newHost *VirtualHost) {
-	v.ListenPort = newHost.ListenPort
-	v.Root = newHost.Root
-	v.Index = newHost.Index
-	v.TryFiles = newHost.TryFiles
-	v.UseSSL = newHost.UseSSL
-	v.CertPath = newHost.CertPath
-	v.KeyPath = newHost.KeyPath
-	v.RedirectToHTTPS = newHost.RedirectToHTTPS
-	v.ProxyURL = newHost.ProxyURL
-	v.disabled = newHost.disabled
 }
