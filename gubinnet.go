@@ -2,6 +2,7 @@ package main
 
 import (
 	"compress/gzip"
+	"context"
 	"crypto/tls"
 	"fmt"
 	"net/http"
@@ -36,11 +37,13 @@ var (
 		Name: "http_requests_total",
 		Help: "Total number of HTTP requests",
 	}, []string{"method", "path", "status"})
+
 	requestDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "http_request_duration_seconds",
 		Help:    "Duration of HTTP requests",
 		Buckets: []float64{0.1, 0.5, 1, 2.5, 5, 10},
 	}, []string{"method", "path"})
+
 	activeConnections = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "http_active_connections",
 		Help: "Number of active HTTP connections",
@@ -64,6 +67,7 @@ type VirtualHost struct {
 	KeyPath         string
 	RedirectToHTTPS bool
 	ProxyURL        string
+	disabled        bool // Для управления состоянием хоста
 }
 
 // Main Server Structure
@@ -73,6 +77,7 @@ type GubinNET struct {
 	cache    map[string]*cacheEntry
 	mu       sync.Mutex
 	antiDDoS *antiddos.AntiDDoS
+	servers  map[string]*http.Server // Для управления серверами
 }
 
 type cacheEntry struct {
@@ -83,49 +88,57 @@ type cacheEntry struct {
 }
 
 func main() {
-	// Initialize logger
-	logger := logger.NewLogger(LogDir)
+	// Initialize logger with JSONB enabled
+	logger := logger.NewLogger(LogDir, true)
 	if logger == nil {
 		fmt.Println("Failed to initialize logger")
 		os.Exit(1)
 	}
+
 	// Load configuration
 	config := loadConfiguration(ConfigDir, logger)
 	if config == nil {
 		logger.Error("Failed to load configuration", nil)
 		os.Exit(1)
 	}
+
 	// Initialize AntiDDoS
 	defaultConfig := &antiddos.AntiDDoSConfig{
 		MaxRequestsPerSecond: 100,
 		BlockDuration:        60 * time.Second,
 	}
 	antiDDoS := antiddos.NewAntiDDoS(defaultConfig, logger)
+
 	// Initialize server
 	server := &GubinNET{
 		config:   config,
 		logger:   logger,
 		cache:    make(map[string]*cacheEntry),
 		antiDDoS: antiDDoS,
+		servers:  make(map[string]*http.Server),
 	}
+
 	// Start server
 	server.Start()
+
 	// Handle OS signals
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+
 	for sig := range sigChan {
 		switch sig {
 		case syscall.SIGHUP:
 			logger.Info("Reloading configuration", nil)
 			newConfig := loadConfiguration(ConfigDir, logger)
 			if newConfig != nil {
-				server.config = newConfig
+				server.applyNewConfig(newConfig)
 				logger.Info("Configuration reloaded successfully", nil)
 			} else {
 				logger.Error("Failed to reload configuration", nil)
 			}
 		case os.Interrupt, syscall.SIGTERM:
 			logger.Info("Shutting down server", nil)
+			server.gracefulShutdown()
 			os.Exit(0)
 		}
 	}
@@ -145,7 +158,7 @@ func loadConfiguration(configDir string, logger *logger.Logger) *ConfigParser {
 		if !file.IsDir() && strings.HasSuffix(file.Name(), ".ini") {
 			host, err := parseVirtualHost(filepath.Join(configDir, file.Name()))
 			if err != nil {
-				logger.Warn("Failed to parse virtual host configuration", map[string]interface{}{
+				logger.Warning("Failed to parse virtual host configuration", map[string]interface{}{
 					"file":  file.Name(),
 					"error": err,
 				})
@@ -174,7 +187,7 @@ func parseVirtualHost(filePath string) (*VirtualHost, error) {
 	if err != nil {
 		return nil, err
 	}
-	lines := strings.Split(string(data), "\n")
+	lines := strings.Split(string(data), "\n") // Исправлено форматирование строки
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -212,6 +225,102 @@ func parseVirtualHost(filePath string) (*VirtualHost, error) {
 	return host, nil
 }
 
+// Apply new configuration
+func (g *GubinNET) applyNewConfig(newConfig *ConfigParser) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	// Update existing hosts
+	for serverName, newHost := range newConfig.VirtualHosts {
+		if existingHost, exists := g.config.VirtualHosts[serverName]; exists {
+			existingHost.updateConfig(newHost)
+		} else {
+			g.config.VirtualHosts[serverName] = newHost
+			g.startVirtualHost(newHost)
+		}
+	}
+
+	// Remove hosts that are not in the new configuration
+	for serverName := range g.config.VirtualHosts {
+		if _, exists := newConfig.VirtualHosts[serverName]; !exists {
+			g.stopVirtualHost(serverName)
+			delete(g.config.VirtualHosts, serverName)
+		}
+	}
+}
+
+// Graceful shutdown
+func (g *GubinNET) gracefulShutdown() {
+	var wg sync.WaitGroup
+	for serverName, server := range g.servers {
+		wg.Add(1)
+		go func(name string, srv *http.Server) {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			server.Shutdown(ctx)
+		}(serverName, server)
+	}
+	wg.Wait()
+}
+
+// Start virtual host
+func (g *GubinNET) startVirtualHost(host *VirtualHost) {
+	server := &http.Server{
+		Addr:         fmt.Sprintf(":%d", host.ListenPort),
+		Handler:      g.setupMiddleware(http.HandlerFunc(g.handleRequest)),
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
+
+	if host.UseSSL {
+		cert, err := tls.LoadX509KeyPair(host.CertPath, host.KeyPath)
+		if err == nil {
+			server.TLSConfig = &tls.Config{
+				Certificates: []tls.Certificate{cert},
+				MinVersion:   tls.VersionTLS12,
+			}
+		}
+	}
+
+	g.mu.Lock()
+	g.servers[host.ServerName] = server
+	g.mu.Unlock()
+
+	go func() {
+		var err error
+		if host.UseSSL {
+			err = server.ListenAndServeTLS("", "")
+		} else {
+			err = server.ListenAndServe()
+		}
+
+		if err != nil && err != http.ErrServerClosed {
+			g.logger.Error("Server error", map[string]interface{}{
+				"server_name": host.ServerName,
+				"error":       err,
+			})
+		}
+	}()
+}
+
+// Stop virtual host
+func (g *GubinNET) stopVirtualHost(serverName string) {
+	g.mu.Lock()
+	server, exists := g.servers[serverName]
+	if exists {
+		delete(g.servers, serverName)
+	}
+	g.mu.Unlock()
+
+	if exists {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		server.Shutdown(ctx)
+	}
+}
+
 // Start the server
 func (g *GubinNET) Start() {
 	g.logger.Info("Starting server", nil)
@@ -229,6 +338,7 @@ func (g *GubinNET) Start() {
 			g.logger.Error("HTTP server error", map[string]interface{}{"error": err})
 		}
 	}()
+
 	// Start HTTPS server with SNI support
 	go func() {
 		certMap := make(map[string]tls.Certificate)
@@ -249,7 +359,7 @@ func (g *GubinNET) Start() {
 			if cert, ok := certMap[hello.ServerName]; ok {
 				return &cert, nil
 			}
-			g.logger.Warn("No certificate found for host", map[string]interface{}{
+			g.logger.Warning("No certificate found for host", map[string]interface{}{
 				"host": hello.ServerName,
 			})
 			return nil, fmt.Errorf("no certificate found for host: %s", hello.ServerName)
@@ -279,21 +389,25 @@ func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
 		duration := time.Since(start).Seconds()
 		requestDuration.WithLabelValues(r.Method, r.URL.Path).Observe(duration)
 	}(time.Now())
+
 	// Generate unique Request ID
 	requestID := uuid.New().String()
 	w.Header().Set("X-Request-ID", requestID)
+
 	hostHeader := strings.Split(strings.TrimSuffix(r.Host, ";"), ":")[0]
 	host, exists := g.config.VirtualHosts[hostHeader]
 	if !exists || host.Root == "" {
 		g.serveHostNotFoundPage(w, r, requestID)
 		return
 	}
+
 	// Redirect to HTTPS
 	if host.RedirectToHTTPS && r.TLS == nil {
 		url := "https://" + hostHeader + r.URL.String()
 		http.Redirect(w, r, url, http.StatusPermanentRedirect)
 		return
 	}
+
 	g.serveFileOrSpa(w, r, host, requestID)
 }
 
@@ -320,7 +434,6 @@ func (g *GubinNET) serveFileOrSpa(w http.ResponseWriter, r *http.Request, host *
 			}
 		}
 	}
-
 	if err == nil && !fileInfo.IsDir() {
 		// Handle PHP
 		if strings.HasSuffix(fullPath, ".php") {
@@ -772,4 +885,18 @@ func getStackTrace(skip int) string {
 		stackTrace.WriteString(fmt.Sprintf("File: %s, Line: %d, Function: %s\n", file, line, funcName))
 	}
 	return stackTrace.String()
+}
+
+// Helper method for updating host configuration
+func (v *VirtualHost) updateConfig(newHost *VirtualHost) {
+	v.ListenPort = newHost.ListenPort
+	v.Root = newHost.Root
+	v.Index = newHost.Index
+	v.TryFiles = newHost.TryFiles
+	v.UseSSL = newHost.UseSSL
+	v.CertPath = newHost.CertPath
+	v.KeyPath = newHost.KeyPath
+	v.RedirectToHTTPS = newHost.RedirectToHTTPS
+	v.ProxyURL = newHost.ProxyURL
+	v.disabled = newHost.disabled
 }

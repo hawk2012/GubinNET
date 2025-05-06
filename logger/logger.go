@@ -1,6 +1,8 @@
 package logger
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -9,67 +11,141 @@ import (
 	"time"
 )
 
-// Определение уровня логирования
 type LogLevel int
 
 const (
-	InfoLevel LogLevel = iota
+	DebugLevel LogLevel = iota
+	InfoLevel
 	WarningLevel
 	ErrorLevel
-	DebugLevel
+	CriticalLevel
 )
 
-// Структура логгера
 type Logger struct {
-	logFilePath string
-	mu          sync.Mutex
+	logDir       string
+	jsonbEnabled bool
+	mu           sync.Mutex
+	file         *os.File
+	compressor   *gzip.Writer
+	buffer       *bytes.Buffer
 }
 
-// Создание нового экземпляра логгера
-func NewLogger(logDirectory string) *Logger {
-	absLogDir, err := filepath.Abs(logDirectory)
-	if err != nil {
-		fmt.Println("Invalid log path:", err)
+func NewLogger(logDir string, jsonbEnabled bool) *Logger {
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		fmt.Println("Failed to create log directory:", err)
 		return nil
 	}
-	if _, err := os.Stat(absLogDir); os.IsNotExist(err) {
-		os.MkdirAll(absLogDir, 0755)
+
+	currentDate := time.Now().Format("2006-01-02")
+	logFile := filepath.Join(logDir, fmt.Sprintf("gubinnet-%s.log", currentDate))
+
+	file, err := os.OpenFile(logFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		fmt.Println("Failed to open log file:", err)
+		return nil
 	}
-	logFileName := fmt.Sprintf("log_%s.json", time.Now().Format("20060102"))
-	logFilePath := filepath.Join(absLogDir, logFileName)
-	return &Logger{logFilePath: logFilePath}
+
+	buffer := bytes.NewBuffer(nil)
+	compressor := gzip.NewWriter(buffer)
+
+	return &Logger{
+		logDir:       logDir,
+		jsonbEnabled: jsonbEnabled,
+		file:         file,
+		compressor:   compressor,
+		buffer:       buffer,
+	}
 }
 
-// Общий метод для записи логов
 func (l *Logger) Log(level LogLevel, message string, fields map[string]interface{}) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	levelStr := levelToString(level)
 	logEntry := map[string]interface{}{
-		"timestamp": time.Now().Format(time.RFC3339),
-		"level":     levelStr,
+		"timestamp": time.Now().UnixNano(),
+		"level":     level,
 		"message":   message,
 	}
+
 	for k, v := range fields {
 		logEntry[k] = v
 	}
-	jsonData, err := json.Marshal(logEntry)
-	if err != nil {
-		fmt.Println("Error marshaling log entry:", err)
-		return
+
+	if l.jsonbEnabled {
+		l.writeBinaryLog(logEntry)
+	} else {
+		l.writeTextLog(logEntry)
 	}
-	fmt.Println(string(jsonData)) // Вывод в консоль для удобства отладки
-	file, err := os.OpenFile(l.logFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		fmt.Println("Error writing to log:", err)
-		return
-	}
-	defer file.Close()
-	file.WriteString(string(jsonData) + "\n")
 }
 
-// Удобные методы для каждого уровня логирования
+func (l *Logger) writeBinaryLog(entry map[string]interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	jsonData, _ := json.Marshal(entry)
+	l.compressor.Write(jsonData)
+	l.compressor.Write([]byte{'\n'})
+	l.compressor.Flush()
+
+	if l.buffer.Len() > 1024*1024 { // 1MB
+		l.file.Write(l.buffer.Bytes())
+		l.buffer.Reset()
+	}
+}
+
+func (l *Logger) writeTextLog(entry map[string]interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	formatted := fmt.Sprintf("%v [%d] %s",
+		time.Unix(0, entry["timestamp"].(int64)).Format(time.RFC3339Nano),
+		entry["level"].(int),
+		entry["message"].(string),
+	)
+
+	for k, v := range entry {
+		if k != "timestamp" && k != "level" && k != "message" {
+			formatted += fmt.Sprintf(" %s=%v", k, v)
+		}
+	}
+
+	fmt.Fprintln(l.file, formatted)
+}
+
+func (l *Logger) rotateLogs() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.file != nil {
+		l.file.Close()
+	}
+
+	currentDate := time.Now().Format("2006-01-02")
+	logFile := filepath.Join(l.logDir, fmt.Sprintf("gubinnet-%s.log", currentDate))
+
+	file, err := os.OpenFile(logFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err == nil {
+		l.file = file
+	}
+}
+
+func (l *Logger) Close() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.compressor != nil {
+		l.compressor.Close()
+	}
+
+	if l.file != nil {
+		if l.buffer.Len() > 0 {
+			l.file.Write(l.buffer.Bytes())
+		}
+		l.file.Close()
+	}
+}
+
+func (l *Logger) Debug(message string, fields map[string]interface{}) {
+	l.Log(DebugLevel, message, fields)
+}
+
 func (l *Logger) Info(message string, fields map[string]interface{}) {
 	l.Log(InfoLevel, message, fields)
 }
@@ -78,30 +154,10 @@ func (l *Logger) Warning(message string, fields map[string]interface{}) {
 	l.Log(WarningLevel, message, fields)
 }
 
-func (l *Logger) Warn(message string, fields map[string]interface{}) {
-	l.Warning(message, fields)
-}
-
 func (l *Logger) Error(message string, fields map[string]interface{}) {
 	l.Log(ErrorLevel, message, fields)
 }
 
-func (l *Logger) Debug(message string, fields map[string]interface{}) {
-	l.Log(DebugLevel, message, fields)
-}
-
-// Преобразование уровня логирования в строку
-func levelToString(level LogLevel) string {
-	switch level {
-	case InfoLevel:
-		return "INFO"
-	case WarningLevel:
-		return "WARNING"
-	case ErrorLevel:
-		return "ERROR"
-	case DebugLevel:
-		return "DEBUG"
-	default:
-		return "UNKNOWN"
-	}
+func (l *Logger) Critical(message string, fields map[string]interface{}) {
+	l.Log(CriticalLevel, message, fields)
 }

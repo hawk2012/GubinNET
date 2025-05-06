@@ -99,19 +99,21 @@ func getRealIP(r *http.Request) string {
 	return ip
 }
 
-// Добавление IP в чёрный список
+// Добавление IP в черный список
 func AddToBlacklist(ip string) {
-	// Создаем экземпляр AntiDDoS (если он ещё не создан)
+	// Создаем экземпляр AntiDDoS (если он еще не создан)
 	defaultConfig := &AntiDDoSConfig{
 		MaxRequestsPerSecond: 100,              // Примерное значение
 		BlockDuration:        60 * time.Second, // 1 минута блокировки
 	}
-	defaultLogger := logger.NewLogger("/etc/gubinnet/logs") // Путь к логам
+	// Инициализируем логгер с JSONB включенным (или выключенным, если нужно)
+	defaultLogger := logger.NewLogger("/etc/gubinnet/logs", true) // Второй аргумент: true для JSONB
 	antiDDoS := NewAntiDDoS(defaultConfig, defaultLogger)
 
 	antiDDoS.mu.Lock()
 	defer antiDDoS.mu.Unlock()
 
+	// Добавляем IP в черный список
 	antiDDoS.blockList[ip] = time.Now()
 	antiDDoS.logger.Log(logger.WarningLevel, "Manually added IP to blacklist", map[string]interface{}{
 		"ip":     ip,
