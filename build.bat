@@ -1,5 +1,5 @@
 @echo off
-cd /d E:\data\YandexDisk\Protek\src\GubinNET
+cd /d E:\data\YandexDisk\src\GubinNET
 
 :: Запуск linux_build.bat в новом окне
 start "Linux Build" cmd /c linux_build.bat
