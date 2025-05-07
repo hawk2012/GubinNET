@@ -1,176 +1,208 @@
-# **GubinNET: A Simple and Powerful Web Server for Your Projects**
+# **GubinNET Technical Documentation**
 
-GubinNET is a modern web server designed to simplify the deployment and management of websites, applications, and APIs. It is ideal for developers, website owners, and even beginners who want to quickly launch their projects online.
-
-## **What Can GubinNET Do?**
-
-### 1. **Launch Websites and Applications with Ease**
-   - Want to deploy a website or web application? Simply copy your project files into the server directory, and GubinNET will handle the rest.
-   - Supports popular technologies: .NET, Node.js, PHP, and static sites (HTML, CSS, JavaScript).
-
-### 2. **Protection Against Malicious Activity**
-   - The server automatically protects your site from DDoS attacks and other threats using the `AntiDDoS` module.
-   - Built-in security tools, such as SSL/TLS support and basic authentication, ensure your data remains secure.
-
-### 3. **Fast and Efficient Performance**
-   - GubinNET optimizes file handling and caches content for faster page loading.
-   - Support for data compression (Gzip) ensures efficient file transfer.
-
-### 4. **Flexible Configuration**
-   - All configurations are managed through INI-like files located in `/etc/gubinnet/config`.
-   - Virtual hosts, SSL certificates, and redirection rules are defined in separate `.ini` files for easy management.
-
-### 5. **Monitoring and Diagnostics**
-   - Built-in Prometheus metrics provide insights into server performance, including request counts, durations, and active connections.
-   - Logs are recorded in an easy-to-read format, making it simple to analyze events.
-
-## **What Can You Use GubinNET For?**
-
-### 1. **Personal Websites and Blogs**
-   - If you want to create a blog, portfolio, or personal homepage, GubinNET makes it quick and easy.
-
-### 2. **Web Applications**
-   - Developing an application using Node.js, .NET, or PHP? GubinNET automatically launches and manages your applications.
-
-### 3. **APIs and Microservices**
-   - Need a server for API operations? GubinNET supports request routing and proxying, making it perfect for microservice architectures.
-
-### 4. **Dynamic Content Websites**
-   - GubinNET excels at handling single-page applications (SPAs) like React, Angular, or Vue.js, thanks to its support for fallback routes.
+GubinNET is a modern, lightweight, and extensible web server designed for developers, system administrators, and businesses to deploy and manage websites, APIs, and web applications efficiently. Below is a detailed technical overview of its features, architecture, and functionality.
 
 ---
 
-## **How to Get Started?**
+## **1. Core Features**
 
-### 1. **Install GubinNET**
-   - Download and install the server on your computer or hosting environment. Ensure you have Go installed:
-     ```bash
-     go version
-     ```
+### **1.1 Flexible Configuration**
+- **INI-Based Configuration Files**: All server settings are managed through INI-like configuration files stored in `/etc/gubinnet/config`. Each virtual host has its own `.ini` file, allowing for granular control over settings such as:
+  - Server name (`server_name`)
+  - Listening port (`listen_port`)
+  - Root directory (`root_path`)
+  - Index file (`index_file`)
+  - SSL/TLS support (`use_ssl`, `cert_path`, `key_path`)
+  - Redirection rules (`redirect_to_https`)
+  - Proxy URLs (`proxy_url`)
+- **Dynamic Reloading**: Configurations can be reloaded without restarting the server by sending the `SIGHUP` signal. This ensures minimal downtime during updates.
 
-### 2. **Set Up Configuration Directory**
-   GubinNET uses INI-like configuration files stored in `/etc/gubinnet/config`. Follow these steps to set up the configuration:
+### **1.2 Virtual Host Management**
+- **Multiple Virtual Hosts**: GubinNET supports hosting multiple websites or applications on the same server. Each virtual host can have its own configuration, including separate root directories, SSL certificates, and proxy settings.
+- **Dynamic Host Addition/Removal**: New virtual hosts can be added or removed dynamically by updating the configuration files and reloading the server.
 
-   #### a. **Create Configuration Directory**
-   - Create the configuration and logs directories:
-     ```bash
-     sudo mkdir -p /etc/gubinnet/{config,logs}
-     ```
+### **1.3 Security Features**
+- **AntiDDoS Protection**:
+  - Limits the number of requests per second from a single IP address.
+  - Blocks malicious IPs after exceeding the request threshold.
+  - Logs suspicious activity for further analysis.
+- **SSL/TLS Support with SNI**:
+  - Supports multiple SSL certificates using Server Name Indication (SNI).
+  - Dynamically loads certificates based on the requested hostname.
+- **Security Middleware**:
+  - Blocks suspicious requests targeting sensitive endpoints (e.g., `.env`, `/shell`, `/wordpress/wp-admin/setup-config.php`).
+  - Prevents unauthorized access to critical resources.
 
-   #### b. **Add Virtual Host Configuration**
-   - Create an INI file for each virtual host in `/etc/gubinnet/config`. Example (`example.com.ini`):
-     ```ini
-     server_name=example.com
-     listen_port=80
-     root_path=/var/www/example
-     index_file=index.html
-     try_files=$uri /index.html
-     use_ssl=false
-     cert_path=
-     key_path=
-     redirect_to_https=true
-     proxy_url=
-     ```
+### **1.4 Performance Optimization**
+- **Caching**:
+  - Files are cached in memory to reduce disk I/O and improve response times.
+  - Cache entries include metadata such as modification time, size, and content type.
+- **Content Compression**:
+  - Responses are compressed using Gzip if the client supports it (`Accept-Encoding: gzip`).
+- **Request Metrics**:
+  - Tracks active connections, request durations, and total HTTP requests using Prometheus metrics.
 
-   #### c. **Verify Root Path**
-   - Ensure the `root_path` exists and contains your website or application files:
-     ```bash
-     sudo mkdir -p /var/www/example
-     sudo cp -r your-files/* /var/www/example/
-     ```
+### **1.5 Monitoring and Diagnostics**
+- **Prometheus Metrics**:
+  - Exposes metrics for monitoring server performance:
+    - Total HTTP requests (`http_requests_total`)
+    - Request durations (`http_request_duration_seconds`)
+    - Active connections (`http_active_connections`)
+  - Metrics can be scraped by Prometheus for visualization in tools like Grafana.
+- **Structured Logging**:
+  - Logs are recorded in JSON format for easy analysis.
+  - Includes details such as request ID, method, path, status code, duration, and user agent.
 
-### 3. **Build and Run the Server**
-   - Clone the repository and navigate to the project directory:
-     ```bash
-     git clone https://github.com/hawk2012/GubinNET.git
-     cd GubinNET
-     ```
-   - Build the server:
-     ```bash
-     go build -o gubinnet
-     ```
-   - Run the server:
-     ```bash
-     ./gubinnet
-     ```
+### **1.6 Graceful Shutdown and Reliability**
+- **Graceful Shutdown**:
+  - Active connections are given a grace period (30 seconds) to complete before shutting down.
+  - Ensures no data loss or abrupt termination during maintenance.
+- **High Availability**:
+  - Designed to handle high loads with stability and reliability.
 
-### 4. **Reload Configurations**
-   - To reload configurations without restarting the server, send the `SIGHUP` signal:
-     ```bash
-     kill -SIGHUP <server-pid>
-     ```
+---
 
-## **Key Features in the Code**
+## **2. Advanced Features**
 
-### 1. **INI-Based Configuration**
-   - Virtual hosts, SSL certificates, and redirection rules are stored in INI-like files in `/etc/gubinnet/config`.
-   - Example configuration (`example.com.ini`):
-     ```ini
-     server_name=example.com
-     listen_port=80
-     root_path=/var/www/example
-     index_file=index.html
-     try_files=$uri /index.html
-     use_ssl=false
-     cert_path=
-     key_path=
-     redirect_to_https=true
-     proxy_url=
-     ```
+### **2.1 Custom Error Pages**
+- Provides user-friendly error pages for common HTTP errors (e.g., 404 Not Found, 500 Internal Server Error).
+- Includes details such as the request ID for easier debugging.
 
-### 2. **AntiDDoS Protection**
-   - The `AntiDDoS` module limits the number of requests per second from a single IP address.
-   - If the limit is exceeded, the IP is blocked for a configurable duration.
+### **2.2 PHP Support**
+- Supports PHP applications using the `php-cgi` binary.
+- To enable PHP support, install `php-cgi`:
+  ```bash
+  sudo apt install php-cgi
+  ```
 
-### 3. **HTTPS Support with SNI**
-   - The server supports multiple SSL certificates using Server Name Indication (SNI).
-   - Certificates are dynamically loaded from the filesystem based on the requested hostname.
+### **2.3 Middleware Stack**
+- **Security Middleware**:
+  - Blocks suspicious requests targeting sensitive endpoints.
+- **AntiDDoS Middleware**:
+  - Limits requests per second and blocks malicious IPs.
+- **Logging Middleware**:
+  - Logs every request with details such as method, path, status code, duration, and request ID.
+- **Metrics Middleware**:
+  - Tracks active connections and updates Prometheus metrics.
 
-### 4. **Graceful Shutdown and Reload**
-   - The server listens for system signals (`SIGTERM`, `SIGHUP`) to gracefully shut down or reload configurations.
+### **2.4 File Serving and Fallback Routes**
+- **Static File Serving**:
+  - Efficiently serves static files (HTML, CSS, JavaScript, images, etc.) with caching and compression.
+- **Fallback Routes**:
+  - Supports fallback routes for single-page applications (SPAs) like React, Angular, or Vue.js.
+  - Allows specifying custom fallback files using the `try_files` directive.
 
-### 5. **Custom Error Pages**
-   - GubinNET serves user-friendly error pages for common HTTP errors (e.g., 404 Not Found, 500 Internal Server Error). These pages include details such as the request ID for easier debugging.
+### **2.5 Proxy Support**
+- Forwards requests to backend services using the `proxy_url` directive.
+- Useful for microservices, APIs, and load balancing scenarios.
 
-### 6. **PHP Support**
-   - GubinNET supports PHP applications using the `php-cgi` binary. To enable PHP support:
-     ```bash
-     sudo apt install php-cgi
-     ```
+---
 
-### 7. **Prometheus Metrics**
-   - GubinNET exposes metrics for monitoring using Prometheus. Metrics include:
-     - Total HTTP requests
-     - Request durations
-     - Active connections
+## **3. Architecture Overview**
 
-   To access metrics:
-   1. Install Prometheus: [Prometheus Installation Guide](https://prometheus.io/docs/prometheus/latest/installation/)
-   2. Configure Prometheus to scrape metrics from `http://<server-ip>:<metrics-port>/metrics`.
-   3. Visualize metrics using Grafana or Prometheus's built-in dashboard.
+### **3.1 Configuration Parser**
+- Parses INI-like configuration files to load virtual host settings.
+- Validates the existence of root directories and logs warnings for missing paths.
 
-## **Why Choose GubinNET?**
+### **3.2 Virtual Host Management**
+- Manages multiple virtual hosts with independent configurations.
+- Dynamically starts or stops virtual hosts based on configuration changes.
 
-- **Ease of Use**: No complex configurations — everything works "out of the box."
-- **Reliability**: The server performs stably even under high loads.
-- **Security**: Protection against attacks and unauthorized access.
-- **Flexibility**: Support for multiple technologies and extensibility through plugins.
+### **3.3 Middleware Pipeline**
+- Implements a middleware stack to enhance functionality:
+  - Security checks
+  - AntiDDoS protection
+  - Logging and metrics collection
 
-## **Support and Help**
+### **3.4 HTTPS Server with SNI**
+- Starts an HTTPS server on port 443 with support for multiple SSL certificates.
+- Dynamically loads certificates based on the requested hostname.
 
-If you have any questions or issues, our team is always ready to assist:
+### **3.5 HTTP Server**
+- Starts an HTTP server on port 80.
+- Redirects traffic to HTTPS if `redirect_to_https` is enabled.
+
+---
+
+## **4. Deployment and Usage**
+
+### **4.1 Installation**
+- Ensure Go is installed:
+  ```bash
+  go version
+  ```
+- Clone the repository:
+  ```bash
+  git clone https://github.com/hawk2012/GubinNET.git
+  cd GubinNET
+  ```
+- Build the server:
+  ```bash
+  go build -o gubinnet
+  ```
+
+### **4.2 Configuration Setup**
+- Create the configuration and logs directories:
+  ```bash
+  sudo mkdir -p /etc/gubinnet/{config,logs}
+  ```
+- Add virtual host configurations in `/etc/gubinnet/config`. Example (`example.com.ini`):
+  ```ini
+  server_name=example.com
+  listen_port=80
+  root_path=/var/www/example
+  index_file=index.html
+  try_files=$uri /index.html
+  use_ssl=false
+  cert_path=
+  key_path=
+  redirect_to_https=true
+  proxy_url=
+  ```
+
+### **4.3 Running the Server**
+- Start the server:
+  ```bash
+  ./gubinnet
+  ```
+- Reload configurations without restarting:
+  ```bash
+  kill -SIGHUP <server-pid>
+  ```
+
+---
+
+## **5. Use Cases**
+
+### **5.1 Personal Websites and Blogs**
+- Ideal for hosting personal websites, portfolios, or blogs with minimal configuration.
+
+### **5.2 Web Applications**
+- Supports applications built with Node.js, .NET, PHP, and other frameworks.
+
+### **5.3 APIs and Microservices**
+- Provides routing and proxying capabilities for API-based architectures.
+
+### **5.4 Single-Page Applications (SPAs)**
+- Handles fallback routes for SPAs like React, Angular, or Vue.js.
+
+---
+
+## **6. Why Choose GubinNET?**
+
+- **Ease of Use**: Simple INI-based configuration and out-of-the-box functionality.
+- **Performance**: Optimized for fast and efficient file serving with caching and compression.
+- **Security**: Built-in AntiDDoS protection, SSL/TLS support, and security middleware.
+- **Flexibility**: Supports multiple technologies, virtual hosts, and dynamic configurations.
+- **Monitoring**: Integrated Prometheus metrics and structured logging for real-time insights.
+
+---
+
+## **7. Support and Help**
+
+For questions or issues, contact the GubinNET team:
 - Official Repository: [GitHub](https://github.com/hawk2012/GubinNET)
 - Email: platform@gubin.systems
 
 **Thank you for choosing GubinNET!**  
-We hope this server becomes your reliable assistant in the world of web development. Try it today and see for yourself how simple and convenient it is! 😊
-
----
-
-### **Additional Notes**
-- **Configuration Directory**: Ensure the `/etc/gubinnet/config` directory exists and contains valid `.ini` files for each virtual host.
-- **Logs Directory**: Logs are stored in `/etc/gubinnet/logs` for easy analysis.
-- **PHP-CGI**: Install `php-cgi` to enable PHP support:
-  ```bash
-  sudo apt install php-cgi
-  ```
+We hope this server becomes your reliable assistant in the world of web development. Try it today and experience its simplicity and power! 😊
