@@ -30,24 +30,35 @@ type Logger struct {
 	buffer       *bytes.Buffer
 }
 
+// StartAutoRotate запускает автоматическую ротацию логов
+func (l *Logger) StartAutoRotate() {
+	go func() {
+		for {
+			now := time.Now()
+			// Ждём до следующего дня
+			nextDay := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, now.Location())
+			time.Sleep(nextDay.Sub(now))
+
+			// Выполняем ротацию логов
+			l.rotateLogs()
+		}
+	}()
+}
+
 func NewLogger(logDir string, jsonbEnabled bool) *Logger {
 	if err := os.MkdirAll(logDir, 0755); err != nil {
 		fmt.Println("Failed to create log directory:", err)
 		return nil
 	}
-
 	currentDate := time.Now().Format("2006-01-02")
 	logFile := filepath.Join(logDir, fmt.Sprintf("gubinnet-%s.log", currentDate))
-
 	file, err := os.OpenFile(logFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		fmt.Println("Failed to open log file:", err)
 		return nil
 	}
-
 	buffer := bytes.NewBuffer(nil)
-	compressor := gzip.NewWriter(buffer)
-
+	compressor := gzip.NewWriter(file)
 	return &Logger{
 		logDir:       logDir,
 		jsonbEnabled: jsonbEnabled,
@@ -63,11 +74,9 @@ func (l *Logger) Log(level LogLevel, message string, fields map[string]interface
 		"level":     level,
 		"message":   message,
 	}
-
 	for k, v := range fields {
 		logEntry[k] = v
 	}
-
 	if l.jsonbEnabled {
 		l.writeBinaryLog(logEntry)
 	} else {
@@ -81,13 +90,11 @@ func (l *Logger) writeBinaryLog(entry map[string]interface{}) {
 
 	jsonData, _ := json.Marshal(entry)
 	l.compressor.Write(jsonData)
-	l.compressor.Write([]byte{'\n'})
+	l.compressor.Write([]byte{'\n'}) // Добавляем новую строку
 	l.compressor.Flush()
 
-	if l.buffer.Len() > 1024*1024 { // 1MB
-		l.file.Write(l.buffer.Bytes())
-		l.buffer.Reset()
-	}
+	// Сбрасываем буфер на диск
+	l.file.Sync()
 }
 
 func (l *Logger) writeTextLog(entry map[string]interface{}) {
@@ -99,14 +106,14 @@ func (l *Logger) writeTextLog(entry map[string]interface{}) {
 		entry["level"].(int),
 		entry["message"].(string),
 	)
-
 	for k, v := range entry {
 		if k != "timestamp" && k != "level" && k != "message" {
 			formatted += fmt.Sprintf(" %s=%v", k, v)
 		}
 	}
-
 	fmt.Fprintln(l.file, formatted)
+	// Сбрасываем буфер на диск
+	l.file.Sync()
 }
 
 func (l *Logger) rotateLogs() {
@@ -115,14 +122,16 @@ func (l *Logger) rotateLogs() {
 
 	if l.file != nil {
 		l.file.Close()
+		l.compressor.Close()
 	}
 
 	currentDate := time.Now().Format("2006-01-02")
 	logFile := filepath.Join(l.logDir, fmt.Sprintf("gubinnet-%s.log", currentDate))
-
 	file, err := os.OpenFile(logFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err == nil {
 		l.file = file
+		// Пересоздаем компрессор для нового файла
+		l.compressor = gzip.NewWriter(l.file)
 	}
 }
 
@@ -133,15 +142,14 @@ func (l *Logger) Close() {
 	if l.compressor != nil {
 		l.compressor.Close()
 	}
-
 	if l.file != nil {
-		if l.buffer.Len() > 0 {
-			l.file.Write(l.buffer.Bytes())
-		}
+		// Записываем остатки данных
+		l.file.Sync()
 		l.file.Close()
 	}
 }
 
+// Уровни логирования
 func (l *Logger) Debug(message string, fields map[string]interface{}) {
 	l.Log(DebugLevel, message, fields)
 }
