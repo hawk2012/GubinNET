@@ -1,117 +1,117 @@
 # Changelog
 
-Все значимые изменения в проекте GubinNET будут задокументированы в этом файле.
+All notable changes to the GubinNET project will be documented in this file.
 
 ---
 
 ## [1.5.1] - 2025-06-05
 
-### Добавлено
-1. **Обработка PHP-запросов через FastCGI**:
-   - Реализована поддержка выполнения PHP-скриптов через FastCGI (по умолчанию на порту `9000`).
-   - Добавлена проверка существования PHP-файлов перед их обработкой.
-   - Реализован механизм копирования заголовков и ответов между клиентом и PHP-FPM.
+### Added
+1. **PHP Request Handling via FastCGI**:
+   - Implemented support for executing PHP scripts through FastCGI (default port `9000`).
+   - Added checks for the existence of PHP files before processing.
+   - Implemented a mechanism to copy headers and responses between the client and PHP-FPM.
 
-2. **Устранение ошибки 500 для PHP-сайтов**:
-   - Исправлена проблема с некорректной обработкой PHP-запросов, которая ранее вызывала ошибку 500.
-   - Добавлены логи для диагностики ошибок при выполнении PHP-скриптов.
+2. **Resolved 500 Error for PHP Sites**:
+   - Fixed an issue with incorrect PHP request handling that previously caused a 500 error.
+   - Added logs for diagnosing errors during PHP script execution.
 
-3. **Поддержка современных практик PHP 2025 года**:
-   - Добавлена поддержка API-First архитектуры через конфигурацию `try_files`.
-   - Реализована автоматическая маршрутизация запросов для Laravel-приложений (через `index.php`).
+3. **Support for Modern PHP Practices (2025)**:
+   - Added support for API-First architecture via `try_files` configuration.
+   - Implemented automatic request routing for Laravel applications (via `index.php`).
 
-4. **Усиление безопасности**:
-   - Добавлены механизмы защиты от SQL-инъекций и XSS-атак через middleware.
-   - Реализована блокировка подозрительных запросов (например, `.env`, `/shell`).
+4. **Enhanced Security**:
+   - Added mechanisms to protect against SQL injections and XSS attacks through middleware.
+   - Implemented blocking of suspicious requests (e.g., `.env`, `/shell`).
 
-5. **Оптимизация производительности**:
-   - Добавлен механизм кэширования статических файлов для ускорения работы сервера.
-   - Реализована поддержка Gzip-сжатия для текстовых файлов (HTML, CSS, JS).
+5. **Performance Optimization**:
+   - Added a caching mechanism for static files to improve server performance.
+   - Implemented Gzip compression support for text files (HTML, CSS, JS).
 
-6. **Горизонтальное масштабирование**:
-   - Добавлена поддержка SNI (Server Name Indication) для работы с несколькими SSL-сертификатами на одном IP-адресе.
+6. **Horizontal Scaling**:
+   - Added support for SNI (Server Name Indication) to handle multiple SSL certificates on a single IP address.
 
-7. **Логирование и мониторинг**:
-   - Улучшен формат логов для удобства анализа.
-   - Добавлены уникальные идентификаторы запросов (`X-Request-ID`) для трассировки.
-   - Интегрированы метрики Prometheus для мониторинга производительности сервера:
-     - `http_requests_total`: Общее количество HTTP-запросов.
-     - `http_request_duration_seconds`: Время обработки запросов.
-     - `http_active_connections`: Количество активных соединений.
+7. **Logging and Monitoring**:
+   - Improved log format for easier analysis.
+   - Added unique request identifiers (`X-Request-ID`) for tracing.
+   - Integrated Prometheus metrics for server performance monitoring:
+     - `http_requests_total`: Total number of HTTP requests.
+     - `http_request_duration_seconds`: Request processing time.
+     - `http_active_connections`: Number of active connections.
 
-8. **Обработка ошибок**:
-   - Добавлены страницы ошибок для различных ситуаций:
-     - Страница "Host Not Found" для несуществующих хостов.
-     - Страница "File Not Found" для отсутствующих файлов.
-     - Страница "Access Denied" для заблокированных запросов.
+8. **Error Handling**:
+   - Added error pages for various scenarios:
+     - "Host Not Found" page for non-existent hosts.
+     - "File Not Found" page for missing files.
+     - "Access Denied" page for blocked requests.
 
-9. **Горячая перезагрузка конфигурации**:
-   - Реализована возможность перезагрузки конфигурации через сигнал `SIGHUP`.
+9. **Hot Configuration Reload**:
+   - Implemented the ability to reload configuration via the `SIGHUP` signal.
 
 ---
 
-### Изменено
-1. **Структура конфигурации**:
-   - Добавлены новые параметры для поддержки PHP и SSL:
-     - `use_ssl`: Включение HTTPS.
-     - `redirect_to_https`: Автоматическое перенаправление HTTP на HTTPS.
-     - `proxy_url`: Поддержка проксирования запросов.
+### Changed
+1. **Configuration Structure**:
+   - Added new parameters to support PHP and SSL:
+     - `use_ssl`: Enable HTTPS.
+     - `redirect_to_https`: Automatic redirection from HTTP to HTTPS.
+     - `proxy_url`: Support for request proxying.
 
 2. **Middleware**:
-   - Переработаны middleware для более четкого разделения функционала:
-     - `securityMiddleware`: Защита от подозрительных запросов.
-     - `loggingMiddleware`: Логирование всех запросов.
-     - `metricsMiddleware`: Сбор метрик для мониторинга.
+   - Reworked middleware for clearer separation of functionality:
+     - `securityMiddleware`: Protection against suspicious requests.
+     - `loggingMiddleware`: Logging of all requests.
+     - `metricsMiddleware`: Collection of metrics for monitoring.
 
-3. **Кэширование файлов**:
-   - Улучшен механизм кэширования статических файлов:
-     - Добавлена проверка времени модификации файлов для обновления кэша.
-     - Реализована поддержка `ETag` и `Last-Modified` заголовков.
+3. **File Caching**:
+   - Improved the caching mechanism for static files:
+     - Added file modification time checks for cache updates.
+     - Implemented support for `ETag` and `Last-Modified` headers.
 
-4. **Обработка статических файлов**:
-   - Улучшена логика поиска `index.html` в директориях.
-   - Добавлена поддержка нескольких вариантов индексных файлов (`index.html`, `index.htm`, `default.htm`).
-
----
-
-### Исправлено
-1. **Проблемы с обработкой запросов**:
-   - Исправлена ошибка, из-за которой сервер мог возвращать ошибку 500 при некорректной обработке PHP-запросов.
-   - Устранена проблема с некорректным определением MIME-типов для статических файлов.
-
-2. **Блокировка подозрительных запросов**:
-   - Исправлена логика блокировки запросов, содержащих потенциально опасные шаблоны (например, `.env`, `/shell`).
-
-3. **Перехват сигналов ОС**:
-   - Исправлена обработка сигналов `SIGHUP`, `SIGTERM` и других для корректной перезагрузки и завершения работы сервера.
+4. **Static File Handling**:
+   - Improved logic for finding `index.html` in directories.
+   - Added support for multiple index file variants (`index.html`, `index.htm`, `default.htm`).
 
 ---
 
-### Удалено
-1. **Устаревшие методы**:
-   - Удалены методы, которые больше не используются, например, `updateConfig` из структуры `VirtualHost`.
+### Fixed
+1. **Request Handling Issues**:
+   - Fixed an error where the server could return a 500 error due to incorrect PHP request handling.
+   - Resolved issues with incorrect MIME type determination for static files.
 
-2. **Ненужные конфигурации**:
-   - Очищены устаревшие или неиспользуемые параметры конфигурации для упрощения кодовой базы.
+2. **Blocking Suspicious Requests**:
+   - Fixed the logic for blocking requests containing potentially dangerous patterns (e.g., `.env`, `/shell`).
 
----
-
-### Безопасность
-1. **Защита от атак**:
-   - Добавлены механизмы защиты от SQL-инъекций и XSS-атак.
-   - Реализована блокировка подозрительных запросов через middleware.
-
-2. **Минимальная версия TLS**:
-   - Установлено ограничение на использование TLS версии 1.2 и выше для безопасных соединений.
-
-3. **Отслеживание IP-адресов**:
-   - Реализовано отслеживание IP-адресов для предотвращения DDoS-атак.
+3. **OS Signal Handling**:
+   - Fixed handling of `SIGHUP`, `SIGTERM`, and other signals for proper server reload and shutdown.
 
 ---
 
-### Документация
-1. **Комментарии в коде**:
-   - Добавлены подробные комментарии для всех ключевых функций и методов.
+### Removed
+1. **Deprecated Methods**:
+   - Removed unused methods, such as `updateConfig` from the `VirtualHost` structure.
 
-2. **Руководство по конфигурации**:
-   - Обновлено руководство по настройке сервера с учетом новых параметров и функциональности.
+2. **Unused Configurations**:
+   - Cleaned up outdated or unused configuration parameters to simplify the codebase.
+
+---
+
+### Security
+1. **Protection Against Attacks**:
+   - Added mechanisms to protect against SQL injections and XSS attacks.
+   - Implemented blocking of suspicious requests via middleware.
+
+2. **Minimum TLS Version**:
+   - Set a restriction to use TLS version 1.2 and above for secure connections.
+
+3. **IP Address Tracking**:
+   - Implemented IP address tracking to prevent DDoS attacks.
+
+---
+
+### Documentation
+1. **Code Comments**:
+   - Added detailed comments for all key functions and methods.
+
+2. **Configuration Guide**:
+   - Updated the server setup guide to include new parameters and functionality.

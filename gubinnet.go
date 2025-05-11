@@ -1,7 +1,12 @@
 package main
 
+/*
+#cgo LDFLAGS: -L. -lantiddos -lpthread
+#include <stdlib.h>
+#include "antiddos.h"
+*/
+import "C"
 import (
-	"GubinNET/antiddos"
 	"GubinNET/logger"
 	"compress/gzip"
 	"context"
@@ -16,6 +21,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
@@ -67,12 +73,11 @@ type VirtualHost struct {
 
 // Main Server Structure
 type GubinNET struct {
-	config   *ConfigParser
-	logger   *logger.Logger
-	cache    map[string]*cacheEntry
-	mu       sync.Mutex
-	antiDDoS *antiddos.AntiDDoS
-	servers  map[string]*http.Server // Для управления серверами
+	config  *ConfigParser
+	logger  *logger.Logger
+	cache   map[string]*cacheEntry
+	mu      sync.Mutex
+	servers map[string]*http.Server // Для управления серверами
 }
 
 type cacheEntry struct {
@@ -99,26 +104,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Initialize AntiDDoS
-	defaultConfig := &antiddos.AntiDDoSConfig{
-		MaxRequestsPerSecond: 100,
-		BlockDuration:        60 * time.Second,
-		LogFilePath:          filepath.Join(LogDir, "antiddos.log"),
-	}
-	antiDDoS, err := antiddos.NewAntiDDoS(defaultConfig)
-	if err != nil {
-		logger.Error("Failed to initialize AntiDDoS", map[string]interface{}{"error": err})
-		os.Exit(1)
-	}
-	defer antiDDoS.Close()
-
 	// Initialize server
 	server := &GubinNET{
-		config:   config,
-		logger:   logger,
-		cache:    make(map[string]*cacheEntry),
-		antiDDoS: antiDDoS,
-		servers:  make(map[string]*http.Server),
+		config:  config,
+		logger:  logger,
+		cache:   make(map[string]*cacheEntry),
+		servers: make(map[string]*http.Server),
 	}
 
 	// Start server
@@ -232,7 +223,6 @@ func parseVirtualHost(filePath string) (*VirtualHost, error) {
 func (g *GubinNET) applyNewConfig(newConfig *ConfigParser) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-
 	// Update existing hosts
 	for serverName, newHost := range newConfig.VirtualHosts {
 		if existingHost, exists := g.config.VirtualHosts[serverName]; exists {
@@ -251,7 +241,6 @@ func (g *GubinNET) applyNewConfig(newConfig *ConfigParser) {
 			g.startVirtualHost(newHost)
 		}
 	}
-
 	// Remove hosts that are not in the new configuration
 	for serverName := range g.config.VirtualHosts {
 		if _, exists := newConfig.VirtualHosts[serverName]; !exists {
@@ -331,7 +320,6 @@ func (g *GubinNET) stopVirtualHost(serverName string) {
 // Start the server
 func (g *GubinNET) Start() {
 	g.logger.Info("Starting server", nil)
-
 	// Start HTTP server
 	go func() {
 		httpServer := &http.Server{
@@ -346,7 +334,6 @@ func (g *GubinNET) Start() {
 			g.logger.Error("HTTP server error", map[string]interface{}{"error": err})
 		}
 	}()
-
 	// Start HTTPS server with SNI support
 	go func() {
 		certMap := make(map[string]tls.Certificate)
@@ -397,31 +384,26 @@ func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
 		duration := time.Since(start).Seconds()
 		requestDuration.WithLabelValues(r.Method, r.URL.Path).Observe(duration)
 	}(time.Now())
-
 	// Generate unique Request ID
 	requestID := uuid.New().String()
 	w.Header().Set("X-Request-ID", requestID)
-
 	hostHeader := strings.Split(strings.TrimSuffix(r.Host, ";"), ":")[0]
 	host, exists := g.config.VirtualHosts[hostHeader]
 	if !exists || host.Root == "" {
 		g.serveHostNotFoundPage(w, r, requestID)
 		return
 	}
-
 	// Redirect to HTTPS
 	if host.RedirectToHTTPS && r.TLS == nil {
 		url := "https://" + hostHeader + r.URL.String()
 		http.Redirect(w, r, url, http.StatusPermanentRedirect)
 		return
 	}
-
 	// Handle PHP requests
 	if strings.HasSuffix(r.URL.Path, ".php") {
 		g.handlePHPRequest(w, r, host, requestID)
 		return
 	}
-
 	g.serveFileOrSpa(w, r, host, requestID)
 }
 
@@ -432,7 +414,6 @@ func (g *GubinNET) handlePHPRequest(w http.ResponseWriter, r *http.Request, host
 		g.serveErrorPage(w, r, http.StatusNotFound, "File Not Found", "", requestID)
 		return
 	}
-
 	// Execute PHP script using FastCGI
 	client := &http.Client{
 		Timeout: 10 * time.Second,
@@ -449,7 +430,6 @@ func (g *GubinNET) handlePHPRequest(w http.ResponseWriter, r *http.Request, host
 		return
 	}
 	defer resp.Body.Close()
-
 	// Copy response
 	for key, values := range resp.Header {
 		for _, value := range values {
@@ -479,7 +459,6 @@ func (g *GubinNET) serveFileOrSpa(w http.ResponseWriter, r *http.Request, host *
 	requestPath := filepath.Clean(strings.TrimLeft(r.URL.Path, "/"))
 	fullPath := filepath.Join(webRootPath, requestPath)
 	fileInfo, err := os.Stat(fullPath)
-
 	// Check for index.html in directories
 	if err == nil && fileInfo.IsDir() {
 		indexFiles := []string{"index.html", "index.htm", "default.htm"}
@@ -505,7 +484,6 @@ func (g *GubinNET) serveFileOrSpa(w http.ResponseWriter, r *http.Request, host *
 			}
 		}
 	}
-
 	// Proxy if proxy_url is set
 	if host.ProxyURL != "" {
 		g.handleProxy(w, r, host.ProxyURL, requestID)
@@ -524,7 +502,6 @@ func (g *GubinNET) handleProxy(w http.ResponseWriter, r *http.Request, proxyURL 
 		g.serveErrorPage(w, r, http.StatusInternalServerError, "Internal Server Error", "", requestID)
 		return
 	}
-
 	// Copy headers
 	for key, values := range r.Header {
 		for _, value := range values {
@@ -537,7 +514,6 @@ func (g *GubinNET) handleProxy(w http.ResponseWriter, r *http.Request, proxyURL 
 		return
 	}
 	defer resp.Body.Close()
-
 	// Copy response
 	for key, values := range resp.Header {
 		for _, value := range values {
@@ -560,13 +536,24 @@ func (g *GubinNET) handleProxy(w http.ResponseWriter, r *http.Request, proxyURL 
 // Middleware Setup
 func (g *GubinNET) setupMiddleware(handler http.Handler) http.Handler {
 	return g.securityMiddleware(
-		g.antiDDoS.Middleware(
-			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				g.loggingMiddleware(
-					g.metricsMiddleware(handler),
-				).ServeHTTP(w, r)
-			}),
-		),
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ip := getRealIP(r)
+			cIP := C.CString(ip)
+			defer C.free(unsafe.Pointer(cIP))
+
+			if C.is_blocked(cIP) != 0 {
+				g.logger.Warning("Blocked IP via AntiDDoS", map[string]interface{}{
+					"ip": ip,
+				})
+				http.Error(w, "Too many requests", http.StatusTooManyRequests)
+				return
+			}
+
+			C.track_request(cIP)
+			g.loggingMiddleware(
+				g.metricsMiddleware(handler),
+			).ServeHTTP(w, r)
+		}),
 	)
 }
 
@@ -579,9 +566,8 @@ func (g *GubinNET) securityMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			if strings.Contains(path, pattern) {
 				ip := getRealIP(r)
 				g.logger.Warning("Blocked suspicious request", map[string]interface{}{
-					"path":       path,
-					"ip":         ip,
-					"request_id": w.Header().Get("X-Request-ID"),
+					"path": path,
+					"ip":   ip,
 				})
 				g.serveErrorPage(w, r, http.StatusForbidden, "Access Denied", "", w.Header().Get("X-Request-ID"))
 				return

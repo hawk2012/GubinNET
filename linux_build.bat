@@ -3,8 +3,8 @@
 setlocal
 
 :: Определяем пути
-set PROJECT_DIR=E:\data\YandexDisk\src\GubinNET
-set RELEASE_DIR=E:\data\YandexDisk\gubinnet-release\Linux
+set PROJECT_DIR=D:\GubinNET
+set RELEASE_DIR=D:\data\YandexDisk\gubinnet-release\Linux
 
 :: Создаем директорию для релизов, если она не существует
 if not exist "%RELEASE_DIR%" (
@@ -52,6 +52,7 @@ set GOARCH=amd64
 :: Выполняем сборку
 echo Building for %GOOS%/%GOARCH%...
 set GO111MODULE=on
+rustc --crate-type=staticlib -o antiddos/libantiddos.a antiddos/antiddos.rs
 go build -o "%RELEASE_DIR%\gubinnet" .
 if errorlevel 1 (
     echo Failed to build for %GOOS%/%GOARCH%.
