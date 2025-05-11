@@ -1,47 +1,117 @@
-Here is the rewritten **Changelog** for the GubinNET project, organized and formatted for clarity while maintaining all key details:
-
----
-
 # Changelog
 
-All notable changes to the GubinNET project will be documented in this file.
+Все значимые изменения в проекте GubinNET будут задокументированы в этом файле.
 
 ---
 
 ## [1.5.1] - 2025-06-05
 
-### Added
-- **AntiDDoS Integration**: Introduced AntiDDoS middleware to protect against excessive requests. Configurable limits and block durations are supported.
-- **Prometheus Metrics**: Integrated Prometheus metrics for monitoring HTTP request counts, durations, and active connections.
-- **Graceful Shutdown**: Implemented graceful shutdown mechanisms for both HTTP and HTTPS servers to ensure smooth termination.
-- **SNI Support**: Enabled SNI (Server Name Indication) for dynamically serving multiple SSL certificates based on hostnames.
-- **Caching Mechanism**: Added an in-memory caching system for static files to improve performance and reduce disk I/O.
-- **Configuration Reloading**: Added support for reloading configuration files on-the-fly using the `SIGHUP` signal.
-- **Proxy Support**: Implemented reverse proxy functionality for virtual hosts with a `proxy_url` configuration option.
-- **Security Middleware**: Enhanced security by blocking suspicious request patterns such as `.env`, `/shell`, and other common attack vectors.
+### Добавлено
+1. **Обработка PHP-запросов через FastCGI**:
+   - Реализована поддержка выполнения PHP-скриптов через FastCGI (по умолчанию на порту `9000`).
+   - Добавлена проверка существования PHP-файлов перед их обработкой.
+   - Реализован механизм копирования заголовков и ответов между клиентом и PHP-FPM.
 
-### Changed
-- **Logger Enhancements**: Updated the logger to support JSONB format with optional gzip compression for log files.
-- **Middleware Refactoring**: Reorganized the middleware stack to include metrics, logging, and security layers in a clean and modular way.
-- **Error Handling**: Improved error handling and reporting for invalid configurations, missing files, and server errors.
-- **Virtual Host Management**: Simplified virtual host updates during configuration reloads by directly modifying fields instead of relying on deprecated methods like `updateConfig`.
+2. **Устранение ошибки 500 для PHP-сайтов**:
+   - Исправлена проблема с некорректной обработкой PHP-запросов, которая ранее вызывала ошибку 500.
+   - Добавлены логи для диагностики ошибок при выполнении PHP-скриптов.
 
-### Fixed
-- **Assignment Mismatch**: Resolved mismatch issues in variable assignments when initializing AntiDDoS configurations.
-- **Argument Count Errors**: Fixed argument count mismatches in calls to `antiddos.NewAntiDDoS`.
-- **Undefined Methods**: Removed usage of undefined methods such as `updateConfig` from the `VirtualHost` structure.
-- **Static File Serving**: Corrected issues with serving index files (`index.html`, `index.htm`) in directories.
-- **ETag and Last-Modified Headers**: Ensured proper handling of `ETag` and `Last-Modified` headers for cached responses to prevent unnecessary re-fetching.
+3. **Поддержка современных практик PHP 2025 года**:
+   - Добавлена поддержка API-First архитектуры через конфигурацию `try_files`.
+   - Реализована автоматическая маршрутизация запросов для Laravel-приложений (через `index.php`).
 
-### Removed
-- **Unused Methods**: Removed unused or redundant methods such as `updateConfig` from the `VirtualHost` structure.
-- **Deprecated Configurations**: Cleaned up deprecated or unused configuration parameters to streamline the codebase.
+4. **Усиление безопасности**:
+   - Добавлены механизмы защиты от SQL-инъекций и XSS-атак через middleware.
+   - Реализована блокировка подозрительных запросов (например, `.env`, `/shell`).
 
-### Security
-- **Blocked Patterns**: Added common attack patterns (e.g., `.env`, `/shell`) to the security middleware to prevent unauthorized access attempts.
-- **TLS Configuration**: Enforced a minimum TLS version of 1.2 for secure connections.
-- **IP Tracking**: Implemented IP-based request tracking and blocking to mitigate DDoS attacks effectively.
+5. **Оптимизация производительности**:
+   - Добавлен механизм кэширования статических файлов для ускорения работы сервера.
+   - Реализована поддержка Gzip-сжатия для текстовых файлов (HTML, CSS, JS).
 
-### Documentation
-- **Code Comments**: Added detailed inline comments throughout the codebase for better readability and maintainability.
-- **Configuration Guide**: Updated documentation to include new configuration options and their usage, ensuring users can easily understand and configure the server.
+6. **Горизонтальное масштабирование**:
+   - Добавлена поддержка SNI (Server Name Indication) для работы с несколькими SSL-сертификатами на одном IP-адресе.
+
+7. **Логирование и мониторинг**:
+   - Улучшен формат логов для удобства анализа.
+   - Добавлены уникальные идентификаторы запросов (`X-Request-ID`) для трассировки.
+   - Интегрированы метрики Prometheus для мониторинга производительности сервера:
+     - `http_requests_total`: Общее количество HTTP-запросов.
+     - `http_request_duration_seconds`: Время обработки запросов.
+     - `http_active_connections`: Количество активных соединений.
+
+8. **Обработка ошибок**:
+   - Добавлены страницы ошибок для различных ситуаций:
+     - Страница "Host Not Found" для несуществующих хостов.
+     - Страница "File Not Found" для отсутствующих файлов.
+     - Страница "Access Denied" для заблокированных запросов.
+
+9. **Горячая перезагрузка конфигурации**:
+   - Реализована возможность перезагрузки конфигурации через сигнал `SIGHUP`.
+
+---
+
+### Изменено
+1. **Структура конфигурации**:
+   - Добавлены новые параметры для поддержки PHP и SSL:
+     - `use_ssl`: Включение HTTPS.
+     - `redirect_to_https`: Автоматическое перенаправление HTTP на HTTPS.
+     - `proxy_url`: Поддержка проксирования запросов.
+
+2. **Middleware**:
+   - Переработаны middleware для более четкого разделения функционала:
+     - `securityMiddleware`: Защита от подозрительных запросов.
+     - `loggingMiddleware`: Логирование всех запросов.
+     - `metricsMiddleware`: Сбор метрик для мониторинга.
+
+3. **Кэширование файлов**:
+   - Улучшен механизм кэширования статических файлов:
+     - Добавлена проверка времени модификации файлов для обновления кэша.
+     - Реализована поддержка `ETag` и `Last-Modified` заголовков.
+
+4. **Обработка статических файлов**:
+   - Улучшена логика поиска `index.html` в директориях.
+   - Добавлена поддержка нескольких вариантов индексных файлов (`index.html`, `index.htm`, `default.htm`).
+
+---
+
+### Исправлено
+1. **Проблемы с обработкой запросов**:
+   - Исправлена ошибка, из-за которой сервер мог возвращать ошибку 500 при некорректной обработке PHP-запросов.
+   - Устранена проблема с некорректным определением MIME-типов для статических файлов.
+
+2. **Блокировка подозрительных запросов**:
+   - Исправлена логика блокировки запросов, содержащих потенциально опасные шаблоны (например, `.env`, `/shell`).
+
+3. **Перехват сигналов ОС**:
+   - Исправлена обработка сигналов `SIGHUP`, `SIGTERM` и других для корректной перезагрузки и завершения работы сервера.
+
+---
+
+### Удалено
+1. **Устаревшие методы**:
+   - Удалены методы, которые больше не используются, например, `updateConfig` из структуры `VirtualHost`.
+
+2. **Ненужные конфигурации**:
+   - Очищены устаревшие или неиспользуемые параметры конфигурации для упрощения кодовой базы.
+
+---
+
+### Безопасность
+1. **Защита от атак**:
+   - Добавлены механизмы защиты от SQL-инъекций и XSS-атак.
+   - Реализована блокировка подозрительных запросов через middleware.
+
+2. **Минимальная версия TLS**:
+   - Установлено ограничение на использование TLS версии 1.2 и выше для безопасных соединений.
+
+3. **Отслеживание IP-адресов**:
+   - Реализовано отслеживание IP-адресов для предотвращения DDoS-атак.
+
+---
+
+### Документация
+1. **Комментарии в коде**:
+   - Добавлены подробные комментарии для всех ключевых функций и методов.
+
+2. **Руководство по конфигурации**:
+   - Обновлено руководство по настройке сервера с учетом новых параметров и функциональности.

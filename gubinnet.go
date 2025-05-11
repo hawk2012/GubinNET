@@ -1,6 +1,8 @@
 package main
 
 import (
+	"GubinNET/antiddos"
+	"GubinNET/logger"
 	"compress/gzip"
 	"context"
 	"crypto/tls"
@@ -14,9 +16,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-
-	"GubinNET/antiddos"
-	"GubinNET/logger"
 
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
@@ -35,13 +34,11 @@ var (
 		Name: "http_requests_total",
 		Help: "Total number of HTTP requests",
 	}, []string{"method", "path", "status"})
-
 	requestDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "http_request_duration_seconds",
 		Help:    "Duration of HTTP requests",
 		Buckets: []float64{0.1, 0.5, 1, 2.5, 5, 10},
 	}, []string{"method", "path"})
-
 	activeConnections = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "http_active_connections",
 		Help: "Number of active HTTP connections",
@@ -419,7 +416,57 @@ func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Handle PHP requests
+	if strings.HasSuffix(r.URL.Path, ".php") {
+		g.handlePHPRequest(w, r, host, requestID)
+		return
+	}
+
 	g.serveFileOrSpa(w, r, host, requestID)
+}
+
+// Handle PHP requests
+func (g *GubinNET) handlePHPRequest(w http.ResponseWriter, r *http.Request, host *VirtualHost, requestID string) {
+	phpPath := filepath.Join(host.Root, strings.TrimLeft(r.URL.Path, "/"))
+	if _, err := os.Stat(phpPath); os.IsNotExist(err) {
+		g.serveErrorPage(w, r, http.StatusNotFound, "File Not Found", "", requestID)
+		return
+	}
+
+	// Execute PHP script using FastCGI
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+	}
+	req, err := http.NewRequest(r.Method, fmt.Sprintf("http://127.0.0.1:9000%s", r.URL.String()), r.Body)
+	if err != nil {
+		g.serveErrorPage(w, r, http.StatusInternalServerError, "Internal Server Error", "", requestID)
+		return
+	}
+	req.Header.Set("SCRIPT_FILENAME", phpPath)
+	resp, err := client.Do(req)
+	if err != nil {
+		g.serveErrorPage(w, r, http.StatusBadGateway, "Bad Gateway", "", requestID)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Copy response
+	for key, values := range resp.Header {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	buf := make([]byte, 4096)
+	for {
+		n, err := resp.Body.Read(buf)
+		if n > 0 {
+			w.Write(buf[:n])
+		}
+		if err != nil {
+			break
+		}
+	}
 }
 
 // Serve file or SPA
@@ -429,7 +476,6 @@ func (g *GubinNET) serveFileOrSpa(w http.ResponseWriter, r *http.Request, host *
 		g.serveErrorPage(w, r, http.StatusInternalServerError, "Server configuration error", "", requestID)
 		return
 	}
-
 	requestPath := filepath.Clean(strings.TrimLeft(r.URL.Path, "/"))
 	fullPath := filepath.Join(webRootPath, requestPath)
 	fileInfo, err := os.Stat(fullPath)
@@ -446,12 +492,10 @@ func (g *GubinNET) serveFileOrSpa(w http.ResponseWriter, r *http.Request, host *
 			}
 		}
 	}
-
 	if err == nil && !fileInfo.IsDir() {
 		g.serveFile(w, r, fullPath, fileInfo, requestID)
 		return
 	}
-
 	if len(host.TryFiles) > 0 {
 		for _, tryFile := range host.TryFiles {
 			tryPath := filepath.Join(webRootPath, strings.Replace(tryFile, "$uri", requestPath, 1))
@@ -467,7 +511,6 @@ func (g *GubinNET) serveFileOrSpa(w http.ResponseWriter, r *http.Request, host *
 		g.handleProxy(w, r, host.ProxyURL, requestID)
 		return
 	}
-
 	g.serveErrorPage(w, r, http.StatusNotFound, "File Not Found", fmt.Sprintf("File '%s' does not exist in root path '%s'", requestPath, webRootPath), requestID)
 }
 
@@ -488,7 +531,6 @@ func (g *GubinNET) handleProxy(w http.ResponseWriter, r *http.Request, proxyURL 
 			req.Header.Add(key, value)
 		}
 	}
-
 	resp, err := client.Do(req)
 	if err != nil {
 		g.serveErrorPage(w, r, http.StatusBadGateway, "Bad Gateway", "", requestID)
@@ -621,7 +663,6 @@ func (g *GubinNET) serveFile(w http.ResponseWriter, r *http.Request, filePath st
 	var found bool
 	cached, found = g.cache[filePath]
 	g.mu.Unlock()
-
 	if !found || (fileInfo != nil && fileInfo.ModTime().After(cached.modTime)) {
 		if fileInfo == nil {
 			var err error
@@ -646,18 +687,15 @@ func (g *GubinNET) serveFile(w http.ResponseWriter, r *http.Request, filePath st
 		g.cache[filePath] = cached
 		g.mu.Unlock()
 	}
-
 	w.Header().Set("Content-Type", cached.contentType)
 	w.Header().Set("Content-Length", strconv.FormatInt(cached.size, 10))
 	w.Header().Set("Last-Modified", cached.modTime.Format(http.TimeFormat))
 	etag := fmt.Sprintf(`"%x-%x"`, cached.modTime.Unix(), cached.size)
 	w.Header().Set("ETag", etag)
-
 	if match := r.Header.Get("If-None-Match"); match == etag {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
-
 	if modSince := r.Header.Get("If-Modified-Since"); modSince != "" {
 		modTime, err := http.ParseTime(modSince)
 		if err == nil && cached.modTime.Before(modTime.Add(time.Second)) {
@@ -665,7 +703,6 @@ func (g *GubinNET) serveFile(w http.ResponseWriter, r *http.Request, filePath st
 			return
 		}
 	}
-
 	if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
 		w.Header().Set("Content-Encoding", "gzip")
 		gz := gzip.NewWriter(w)
