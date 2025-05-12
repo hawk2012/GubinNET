@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -17,9 +18,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-
-	"GubinNET/antiddos"
-	"GubinNET/logger"
 
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
@@ -49,11 +47,6 @@ var (
 	})
 )
 
-// Configuration Parser
-type ConfigParser struct {
-	VirtualHosts map[string]*VirtualHost
-}
-
 // Virtual Host Structure
 type VirtualHost struct {
 	ServerName      string
@@ -72,11 +65,11 @@ type VirtualHost struct {
 // Main Server Structure
 type GubinNET struct {
 	config   *ConfigParser
-	logger   *logger.Logger
+	logger   *Logger
 	cache    map[string]*cacheEntry
 	mu       sync.Mutex
-	antiDDoS *antiddos.AntiDDoS
-	servers  map[string]*http.Server // Для управления серверами
+	antiDDoS *AntiDDoS
+	servers  map[string]*http.Server
 }
 
 type cacheEntry struct {
@@ -86,9 +79,172 @@ type cacheEntry struct {
 	contentType string
 }
 
+// Configuration Parser
+type ConfigParser struct {
+	VirtualHosts map[string]*VirtualHost
+}
+
+// ========== ЛОГГЕР ==========
+type Logger struct {
+	file  *os.File
+	jsonb bool
+	mu    sync.Mutex
+}
+
+func NewLogger(logDir string, jsonb bool) *Logger {
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		return nil
+	}
+	logFile := filepath.Join(logDir, "access.log")
+	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return nil
+	}
+	return &Logger{file: f, jsonb: jsonb}
+}
+
+func (l *Logger) Info(msg string, fields map[string]interface{}) {
+	l.log("INFO", msg, fields)
+}
+
+func (l *Logger) Warning(msg string, fields map[string]interface{}) {
+	l.log("WARNING", msg, fields)
+}
+
+func (l *Logger) Error(msg string, fields map[string]interface{}) {
+	l.log("ERROR", msg, fields)
+}
+
+func (l *Logger) log(level, msg string, fields map[string]interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	timestamp := time.Now().Format(time.RFC3339)
+	if l.jsonb {
+		fieldsStr := "{"
+		for k, v := range fields {
+			fieldsStr += fmt.Sprintf(`"%s":%q,`, k, v)
+		}
+		if len(fieldsStr) > 0 && strings.HasSuffix(fieldsStr, ",") {
+			fieldsStr = fieldsStr[:len(fieldsStr)-1]
+		}
+		fieldsStr += "}"
+		line := fmt.Sprintf("%s [%s] %s %s\n", timestamp, level, msg, fieldsStr)
+		l.file.WriteString(line)
+	} else {
+		fieldsStr := ""
+		for k, v := range fields {
+			fieldsStr += fmt.Sprintf(" %s=\"%v\"", k, v)
+		}
+		line := fmt.Sprintf("%s [%s]%s %s\n", timestamp, level, fieldsStr, msg)
+		l.file.WriteString(line)
+	}
+}
+
+func (l *Logger) Close() {
+	_ = l.file.Close()
+}
+
+func (l *Logger) StartAutoRotate() {
+	go func() {
+		for {
+			time.Sleep(24 * time.Hour)
+			newFile, err := os.OpenFile(filepath.Join(LogDir, "access.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+			if err == nil {
+				l.mu.Lock()
+				_ = l.file.Close()
+				l.file = newFile
+				l.mu.Unlock()
+			}
+		}
+	}()
+}
+
+// ========== ANTI-DDOS ==========
+type AntiDDoSConfig struct {
+	MaxRequestsPerSecond int
+	BlockDuration        time.Duration
+	LogFilePath          string
+}
+
+type AntiDDoS struct {
+	cfg       *AntiDDoSConfig
+	ipCount   map[string]int
+	timestamp time.Time
+	bannedIPs map[string]time.Time
+	mu        sync.Mutex
+	logFile   *os.File
+}
+
+func NewAntiDDoS(cfg *AntiDDoSConfig) (*AntiDDoS, error) {
+	if cfg.LogFilePath == "" {
+		cfg.LogFilePath = "/tmp/antiddos.log"
+	}
+	logFile, err := os.OpenFile(cfg.LogFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return nil, err
+	}
+	return &AntiDDoS{
+		cfg:       cfg,
+		ipCount:   make(map[string]int),
+		timestamp: time.Now(),
+		bannedIPs: make(map[string]time.Time),
+		logFile:   logFile,
+	}, nil
+}
+
+func (a *AntiDDoS) Middleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ip := getRealIP(r)
+
+		a.mu.Lock()
+		defer a.mu.Unlock()
+
+		now := time.Now()
+
+		// Clean up expired bans
+		for ip, banTime := range a.bannedIPs {
+			if now.Sub(banTime) > a.cfg.BlockDuration {
+				delete(a.bannedIPs, ip)
+			}
+		}
+
+		if _, banned := a.bannedIPs[ip]; banned {
+			http.Error(w, "403 Forbidden", http.StatusForbidden)
+			a.logToFile(fmt.Sprintf("Blocked IP due to DDoS protection: %s", ip))
+			return
+		}
+
+		if now.Sub(a.timestamp) > time.Second {
+			a.ipCount = make(map[string]int)
+			a.timestamp = now
+		}
+
+		a.ipCount[ip]++
+		if a.ipCount[ip] > a.cfg.MaxRequestsPerSecond {
+			a.bannedIPs[ip] = now
+			http.Error(w, "403 Too many requests", http.StatusForbidden)
+			a.logToFile(fmt.Sprintf("Banned IP due to DDoS protection: %s", ip))
+			return
+		}
+
+		next(w, r)
+	}
+}
+
+func (a *AntiDDoS) logToFile(msg string) {
+	_, _ = a.logFile.WriteString(time.Now().Format(time.RFC3339) + " [ANTIDDOS] " + msg + "\n")
+}
+
+func (a *AntiDDoS) Close() {
+	_ = a.logFile.Close()
+}
+
+// ========== MAIN SERVER LOGIC ==========
+
 func main() {
 	// Initialize logger with JSONB enabled
-	logger := logger.NewLogger(LogDir, true)
+	logger := NewLogger(LogDir, true)
 	if logger == nil {
 		fmt.Println("Failed to initialize logger")
 		os.Exit(1)
@@ -104,12 +260,12 @@ func main() {
 	}
 
 	// Initialize AntiDDoS
-	defaultConfig := &antiddos.AntiDDoSConfig{
+	defaultConfig := &AntiDDoSConfig{
 		MaxRequestsPerSecond: 100,
 		BlockDuration:        60 * time.Second,
 		LogFilePath:          filepath.Join(LogDir, "antiddos.log"),
 	}
-	antiDDoS, err := antiddos.NewAntiDDoS(defaultConfig)
+	antiDDoS, err := NewAntiDDoS(defaultConfig)
 	if err != nil {
 		logger.Error("Failed to initialize AntiDDoS", map[string]interface{}{"error": err})
 		os.Exit(1)
@@ -152,7 +308,7 @@ func main() {
 }
 
 // Load configuration from INI-like files
-func loadConfiguration(configDir string, logger *logger.Logger) *ConfigParser {
+func loadConfiguration(configDir string, logger *Logger) *ConfigParser {
 	config := &ConfigParser{
 		VirtualHosts: make(map[string]*VirtualHost),
 	}
@@ -466,21 +622,28 @@ func (g *GubinNET) serveFileOrSpa(w http.ResponseWriter, r *http.Request, host *
 // Handle PHP-CGI
 func (g *GubinNET) handlePhpCgi(w http.ResponseWriter, r *http.Request, filePath string, requestID string) {
 	env := []string{
+		"GATEWAY_INTERFACE=CGI/1.1",
+		"REDIRECT_STATUS=200",
 		"REQUEST_METHOD=" + r.Method,
 		"SCRIPT_FILENAME=" + filePath,
 		"SCRIPT_NAME=" + r.URL.Path,
 		"QUERY_STRING=" + r.URL.RawQuery,
 		"SERVER_PROTOCOL=" + r.Proto,
-		"GATEWAY_INTERFACE=CGI/1.1",
-		"REDIRECT_STATUS=200",
+		"CONTENT_TYPE=" + r.Header.Get("Content-Type"),
+		"CONTENT_LENGTH=" + r.Header.Get("Content-Length"),
+		"REMOTE_ADDR=" + getRealIP(r),
+	}
+	for k, v := range r.Header {
+		if len(v) > 0 {
+			env = append(env, fmt.Sprintf("HTTP_%s=%s", strings.ToUpper(strings.ReplaceAll(k, "-", "_")), v[0]))
+		}
 	}
 
-	cmd := exec.Command("php-cgi")
+	cmd := exec.Command("php", "-f", filePath)
 	cmd.Env = env
-
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		g.logger.Error("PHP-CGI execution failed", map[string]interface{}{
+		g.logger.Error("PHP execution failed", map[string]interface{}{
 			"error":      err,
 			"request_id": requestID,
 		})
@@ -490,23 +653,25 @@ func (g *GubinNET) handlePhpCgi(w http.ResponseWriter, r *http.Request, filePath
 
 	headerEnd := bytes.Index(output, []byte("\r\n\r\n"))
 	if headerEnd == -1 {
-		g.logger.Error("Invalid PHP-CGI response", map[string]interface{}{
-			"output":     string(output),
+		headerEnd = bytes.Index(output, []byte("\n\n"))
+	}
+	if headerEnd == -1 {
+		g.logger.Error("Invalid PHP response format", map[string]interface{}{
 			"request_id": requestID,
 		})
 		g.serveErrorPage(w, r, http.StatusInternalServerError, "Internal Server Error", "", requestID)
 		return
 	}
 
-	headers := strings.Split(string(output[:headerEnd]), "\n")
-	for _, header := range headers {
-		parts := strings.SplitN(header, ":", 2)
-		if len(parts) == 2 {
+	headers := bufio.NewScanner(bytes.NewReader(output[:headerEnd]))
+	for headers.Scan() {
+		line := headers.Text()
+		if parts := strings.SplitN(line, ":", 2); len(parts) == 2 {
 			w.Header().Set(strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]))
 		}
 	}
 
-	w.Write(output[headerEnd+4:])
+	w.Write(output[headerEnd+2:])
 }
 
 // Handle proxying
@@ -519,28 +684,24 @@ func (g *GubinNET) handleProxy(w http.ResponseWriter, r *http.Request, proxyURL 
 		g.serveErrorPage(w, r, http.StatusInternalServerError, "Internal Server Error", "", requestID)
 		return
 	}
-
 	// Copy headers
 	for key, values := range r.Header {
 		for _, value := range values {
 			req.Header.Add(key, value)
 		}
 	}
-
 	resp, err := client.Do(req)
 	if err != nil {
 		g.serveErrorPage(w, r, http.StatusBadGateway, "Bad Gateway", "", requestID)
 		return
 	}
 	defer resp.Body.Close()
-
 	// Copy response headers
 	for key, values := range resp.Header {
 		for _, value := range values {
 			w.Header().Add(key, value)
 		}
 	}
-
 	// Set status code and stream the response body
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
@@ -779,7 +940,7 @@ func (g *GubinNET) serveHostNotFoundPage(w http.ResponseWriter, r *http.Request,
 func getContentType(filePath string) string {
 	ext := strings.ToLower(filepath.Ext(filePath))
 	switch ext {
-	case ".html":
+	case ".html", ".php":
 		return "text/html; charset=utf-8"
 	case ".css":
 		return "text/css"
@@ -793,8 +954,6 @@ func getContentType(filePath string) string {
 		return "image/jpeg"
 	case ".gif":
 		return "image/gif"
-	case ".php":
-		return "text/html; charset=utf-8"
 	default:
 		return "application/octet-stream"
 	}
