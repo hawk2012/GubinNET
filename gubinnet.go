@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -35,13 +38,11 @@ var (
 		Name: "http_requests_total",
 		Help: "Total number of HTTP requests",
 	}, []string{"method", "path", "status"})
-
 	requestDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "http_request_duration_seconds",
 		Help:    "Duration of HTTP requests",
 		Buckets: []float64{0.1, 0.5, 1, 2.5, 5, 10},
 	}, []string{"method", "path"})
-
 	activeConnections = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "http_active_connections",
 		Help: "Number of active HTTP connections",
@@ -235,7 +236,6 @@ func parseVirtualHost(filePath string) (*VirtualHost, error) {
 func (g *GubinNET) applyNewConfig(newConfig *ConfigParser) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-
 	// Update existing hosts
 	for serverName, newHost := range newConfig.VirtualHosts {
 		if existingHost, exists := g.config.VirtualHosts[serverName]; exists {
@@ -254,7 +254,6 @@ func (g *GubinNET) applyNewConfig(newConfig *ConfigParser) {
 			g.startVirtualHost(newHost)
 		}
 	}
-
 	// Remove hosts that are not in the new configuration
 	for serverName := range g.config.VirtualHosts {
 		if _, exists := newConfig.VirtualHosts[serverName]; !exists {
@@ -334,7 +333,6 @@ func (g *GubinNET) stopVirtualHost(serverName string) {
 // Start the server
 func (g *GubinNET) Start() {
 	g.logger.Info("Starting server", nil)
-
 	// Start HTTP server
 	go func() {
 		httpServer := &http.Server{
@@ -349,7 +347,6 @@ func (g *GubinNET) Start() {
 			g.logger.Error("HTTP server error", map[string]interface{}{"error": err})
 		}
 	}()
-
 	// Start HTTPS server with SNI support
 	go func() {
 		certMap := make(map[string]tls.Certificate)
@@ -400,25 +397,21 @@ func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
 		duration := time.Since(start).Seconds()
 		requestDuration.WithLabelValues(r.Method, r.URL.Path).Observe(duration)
 	}(time.Now())
-
 	// Generate unique Request ID
 	requestID := uuid.New().String()
 	w.Header().Set("X-Request-ID", requestID)
-
 	hostHeader := strings.Split(strings.TrimSuffix(r.Host, ";"), ":")[0]
 	host, exists := g.config.VirtualHosts[hostHeader]
 	if !exists || host.Root == "" {
 		g.serveHostNotFoundPage(w, r, requestID)
 		return
 	}
-
 	// Redirect to HTTPS
 	if host.RedirectToHTTPS && r.TLS == nil {
 		url := "https://" + hostHeader + r.URL.String()
 		http.Redirect(w, r, url, http.StatusPermanentRedirect)
 		return
 	}
-
 	g.serveFileOrSpa(w, r, host, requestID)
 }
 
@@ -429,11 +422,9 @@ func (g *GubinNET) serveFileOrSpa(w http.ResponseWriter, r *http.Request, host *
 		g.serveErrorPage(w, r, http.StatusInternalServerError, "Server configuration error", "", requestID)
 		return
 	}
-
 	requestPath := filepath.Clean(strings.TrimLeft(r.URL.Path, "/"))
 	fullPath := filepath.Join(webRootPath, requestPath)
 	fileInfo, err := os.Stat(fullPath)
-
 	// Check for index.html in directories
 	if err == nil && fileInfo.IsDir() {
 		indexFiles := []string{"index.html", "index.htm", "default.htm"}
@@ -446,12 +437,15 @@ func (g *GubinNET) serveFileOrSpa(w http.ResponseWriter, r *http.Request, host *
 			}
 		}
 	}
-
 	if err == nil && !fileInfo.IsDir() {
+		// Check if the file is a PHP file
+		if strings.HasSuffix(fullPath, ".php") {
+			g.handlePhpCgi(w, r, fullPath, requestID)
+			return
+		}
 		g.serveFile(w, r, fullPath, fileInfo, requestID)
 		return
 	}
-
 	if len(host.TryFiles) > 0 {
 		for _, tryFile := range host.TryFiles {
 			tryPath := filepath.Join(webRootPath, strings.Replace(tryFile, "$uri", requestPath, 1))
@@ -461,14 +455,58 @@ func (g *GubinNET) serveFileOrSpa(w http.ResponseWriter, r *http.Request, host *
 			}
 		}
 	}
-
 	// Proxy if proxy_url is set
 	if host.ProxyURL != "" {
 		g.handleProxy(w, r, host.ProxyURL, requestID)
 		return
 	}
-
 	g.serveErrorPage(w, r, http.StatusNotFound, "File Not Found", fmt.Sprintf("File '%s' does not exist in root path '%s'", requestPath, webRootPath), requestID)
+}
+
+// Handle PHP-CGI
+func (g *GubinNET) handlePhpCgi(w http.ResponseWriter, r *http.Request, filePath string, requestID string) {
+	env := []string{
+		"REQUEST_METHOD=" + r.Method,
+		"SCRIPT_FILENAME=" + filePath,
+		"SCRIPT_NAME=" + r.URL.Path,
+		"QUERY_STRING=" + r.URL.RawQuery,
+		"SERVER_PROTOCOL=" + r.Proto,
+		"GATEWAY_INTERFACE=CGI/1.1",
+		"REDIRECT_STATUS=200",
+	}
+
+	cmd := exec.Command("php-cgi")
+	cmd.Env = env
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		g.logger.Error("PHP-CGI execution failed", map[string]interface{}{
+			"error":      err,
+			"request_id": requestID,
+		})
+		g.serveErrorPage(w, r, http.StatusInternalServerError, "Internal Server Error", "", requestID)
+		return
+	}
+
+	headerEnd := bytes.Index(output, []byte("\r\n\r\n"))
+	if headerEnd == -1 {
+		g.logger.Error("Invalid PHP-CGI response", map[string]interface{}{
+			"output":     string(output),
+			"request_id": requestID,
+		})
+		g.serveErrorPage(w, r, http.StatusInternalServerError, "Internal Server Error", "", requestID)
+		return
+	}
+
+	headers := strings.Split(string(output[:headerEnd]), "\n")
+	for _, header := range headers {
+		parts := strings.SplitN(header, ":", 2)
+		if len(parts) == 2 {
+			w.Header().Set(strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]))
+		}
+	}
+
+	w.Write(output[headerEnd+4:])
 }
 
 // Handle proxying
@@ -496,23 +534,16 @@ func (g *GubinNET) handleProxy(w http.ResponseWriter, r *http.Request, proxyURL 
 	}
 	defer resp.Body.Close()
 
-	// Copy response
+	// Copy response headers
 	for key, values := range resp.Header {
 		for _, value := range values {
 			w.Header().Add(key, value)
 		}
 	}
+
+	// Set status code and stream the response body
 	w.WriteHeader(resp.StatusCode)
-	buf := make([]byte, 4096)
-	for {
-		n, err := resp.Body.Read(buf)
-		if n > 0 {
-			w.Write(buf[:n])
-		}
-		if err != nil {
-			break
-		}
-	}
+	io.Copy(w, resp.Body)
 }
 
 // Middleware Setup
@@ -621,7 +652,6 @@ func (g *GubinNET) serveFile(w http.ResponseWriter, r *http.Request, filePath st
 	var found bool
 	cached, found = g.cache[filePath]
 	g.mu.Unlock()
-
 	if !found || (fileInfo != nil && fileInfo.ModTime().After(cached.modTime)) {
 		if fileInfo == nil {
 			var err error
@@ -646,18 +676,15 @@ func (g *GubinNET) serveFile(w http.ResponseWriter, r *http.Request, filePath st
 		g.cache[filePath] = cached
 		g.mu.Unlock()
 	}
-
 	w.Header().Set("Content-Type", cached.contentType)
 	w.Header().Set("Content-Length", strconv.FormatInt(cached.size, 10))
 	w.Header().Set("Last-Modified", cached.modTime.Format(http.TimeFormat))
 	etag := fmt.Sprintf(`"%x-%x"`, cached.modTime.Unix(), cached.size)
 	w.Header().Set("ETag", etag)
-
 	if match := r.Header.Get("If-None-Match"); match == etag {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
-
 	if modSince := r.Header.Get("If-Modified-Since"); modSince != "" {
 		modTime, err := http.ParseTime(modSince)
 		if err == nil && cached.modTime.Before(modTime.Add(time.Second)) {
@@ -665,7 +692,6 @@ func (g *GubinNET) serveFile(w http.ResponseWriter, r *http.Request, filePath st
 			return
 		}
 	}
-
 	if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
 		w.Header().Set("Content-Encoding", "gzip")
 		gz := gzip.NewWriter(w)
@@ -767,6 +793,8 @@ func getContentType(filePath string) string {
 		return "image/jpeg"
 	case ".gif":
 		return "image/gif"
+	case ".php":
+		return "text/html; charset=utf-8"
 	default:
 		return "application/octet-stream"
 	}
