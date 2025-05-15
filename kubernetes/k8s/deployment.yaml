@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gubinnet
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gubinnet
+  template:
+    metadata:
+      labels:
+        app: gubinnet
+    spec:
+      containers:
+        - name: gubinnet
+          image: hawk2012/gubinnet:latest
+          ports:
+            - containerPort: 80
+            - containerPort: 443
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 30
+            periodSeconds: 60
+          env:
+            - name: ENVIRONMENT
+              value: "production"
+          volumeMounts:
+            - name: config
+              mountPath: /etc/gubinnet/config
+            - name: logs
+              mountPath: /etc/gubinnet/logs
+      volumes:
+        - name: config
+          configMap:
+            name: gubinnet-config
+        - name: logs
+          persistentVolumeClaim:
+            claimName: gubinnet-logs

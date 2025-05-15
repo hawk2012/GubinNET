@@ -1,7 +1,3 @@
-Отлично! Ниже — **готовый README на английском языке**, который вы можете использовать для вашего репозитория на GitHub.
-
----
-
 # GubinNET – Go-based Reverse Proxy with PHP, Node.js, .NET and Static Hosting
 
 GubinNET is a lightweight, high-performance reverse proxy and web server written in Go. It supports:
