@@ -1,8 +1,6 @@
 package main
 
 import (
-	"bufio"
-	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/tls"
@@ -10,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -58,8 +55,7 @@ type VirtualHost struct {
 	CertPath        string
 	KeyPath         string
 	RedirectToHTTPS bool
-	ProxyURL        string
-	disabled        bool // Для управления состоянием хоста
+	ProxyURL        string // Reverse proxy URL
 }
 
 // Main Server Structure
@@ -84,7 +80,7 @@ type ConfigParser struct {
 	VirtualHosts map[string]*VirtualHost
 }
 
-// ========== ЛОГГЕР ==========
+// ========== LOGGER ==========
 type Logger struct {
 	file  *os.File
 	jsonb bool
@@ -118,7 +114,6 @@ func (l *Logger) Error(msg string, fields map[string]interface{}) {
 func (l *Logger) log(level, msg string, fields map[string]interface{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-
 	timestamp := time.Now().Format(time.RFC3339)
 	if l.jsonb {
 		fieldsStr := "{"
@@ -196,30 +191,24 @@ func NewAntiDDoS(cfg *AntiDDoSConfig) (*AntiDDoS, error) {
 func (a *AntiDDoS) Middleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ip := getRealIP(r)
-
 		a.mu.Lock()
 		defer a.mu.Unlock()
-
 		now := time.Now()
-
 		// Clean up expired bans
 		for ip, banTime := range a.bannedIPs {
 			if now.Sub(banTime) > a.cfg.BlockDuration {
 				delete(a.bannedIPs, ip)
 			}
 		}
-
 		if _, banned := a.bannedIPs[ip]; banned {
 			http.Error(w, "403 Forbidden", http.StatusForbidden)
 			a.logToFile(fmt.Sprintf("Blocked IP due to DDoS protection: %s", ip))
 			return
 		}
-
 		if now.Sub(a.timestamp) > time.Second {
 			a.ipCount = make(map[string]int)
 			a.timestamp = now
 		}
-
 		a.ipCount[ip]++
 		if a.ipCount[ip] > a.cfg.MaxRequestsPerSecond {
 			a.bannedIPs[ip] = now
@@ -227,7 +216,6 @@ func (a *AntiDDoS) Middleware(next http.HandlerFunc) http.HandlerFunc {
 			a.logToFile(fmt.Sprintf("Banned IP due to DDoS protection: %s", ip))
 			return
 		}
-
 		next(w, r)
 	}
 }
@@ -241,7 +229,6 @@ func (a *AntiDDoS) Close() {
 }
 
 // ========== MAIN SERVER LOGIC ==========
-
 func main() {
 	// Initialize logger with JSONB enabled
 	logger := NewLogger(LogDir, true)
@@ -250,7 +237,7 @@ func main() {
 		os.Exit(1)
 	}
 	logger.StartAutoRotate()
-	defer logger.Close() // Ensure logger is closed properly
+	defer logger.Close()
 
 	// Load configuration
 	config := loadConfiguration(ConfigDir, logger)
@@ -581,6 +568,7 @@ func (g *GubinNET) serveFileOrSpa(w http.ResponseWriter, r *http.Request, host *
 	requestPath := filepath.Clean(strings.TrimLeft(r.URL.Path, "/"))
 	fullPath := filepath.Join(webRootPath, requestPath)
 	fileInfo, err := os.Stat(fullPath)
+
 	// Check for index.html in directories
 	if err == nil && fileInfo.IsDir() {
 		indexFiles := []string{"index.html", "index.htm", "default.htm"}
@@ -593,15 +581,14 @@ func (g *GubinNET) serveFileOrSpa(w http.ResponseWriter, r *http.Request, host *
 			}
 		}
 	}
+
+	// If file exists — serve it
 	if err == nil && !fileInfo.IsDir() {
-		// Check if the file is a PHP file
-		if strings.HasSuffix(fullPath, ".php") {
-			g.handlePhpCgi(w, r, fullPath, requestID)
-			return
-		}
 		g.serveFile(w, r, fullPath, fileInfo, requestID)
 		return
 	}
+
+	// Try try_files
 	if len(host.TryFiles) > 0 {
 		for _, tryFile := range host.TryFiles {
 			tryPath := filepath.Join(webRootPath, strings.Replace(tryFile, "$uri", requestPath, 1))
@@ -611,67 +598,15 @@ func (g *GubinNET) serveFileOrSpa(w http.ResponseWriter, r *http.Request, host *
 			}
 		}
 	}
+
 	// Proxy if proxy_url is set
 	if host.ProxyURL != "" {
 		g.handleProxy(w, r, host.ProxyURL, requestID)
 		return
 	}
+
+	// File not found
 	g.serveErrorPage(w, r, http.StatusNotFound, "File Not Found", fmt.Sprintf("File '%s' does not exist in root path '%s'", requestPath, webRootPath), requestID)
-}
-
-// Handle PHP-CGI
-func (g *GubinNET) handlePhpCgi(w http.ResponseWriter, r *http.Request, filePath string, requestID string) {
-	env := []string{
-		"GATEWAY_INTERFACE=CGI/1.1",
-		"REDIRECT_STATUS=200",
-		"REQUEST_METHOD=" + r.Method,
-		"SCRIPT_FILENAME=" + filePath,
-		"SCRIPT_NAME=" + r.URL.Path,
-		"QUERY_STRING=" + r.URL.RawQuery,
-		"SERVER_PROTOCOL=" + r.Proto,
-		"CONTENT_TYPE=" + r.Header.Get("Content-Type"),
-		"CONTENT_LENGTH=" + r.Header.Get("Content-Length"),
-		"REMOTE_ADDR=" + getRealIP(r),
-	}
-	for k, v := range r.Header {
-		if len(v) > 0 {
-			env = append(env, fmt.Sprintf("HTTP_%s=%s", strings.ToUpper(strings.ReplaceAll(k, "-", "_")), v[0]))
-		}
-	}
-
-	cmd := exec.Command("php", "-f", filePath)
-	cmd.Env = env
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		g.logger.Error("PHP execution failed", map[string]interface{}{
-			"error":      err,
-			"request_id": requestID,
-		})
-		g.serveErrorPage(w, r, http.StatusInternalServerError, "Internal Server Error", "", requestID)
-		return
-	}
-
-	headerEnd := bytes.Index(output, []byte("\r\n\r\n"))
-	if headerEnd == -1 {
-		headerEnd = bytes.Index(output, []byte("\n\n"))
-	}
-	if headerEnd == -1 {
-		g.logger.Error("Invalid PHP response format", map[string]interface{}{
-			"request_id": requestID,
-		})
-		g.serveErrorPage(w, r, http.StatusInternalServerError, "Internal Server Error", "", requestID)
-		return
-	}
-
-	headers := bufio.NewScanner(bytes.NewReader(output[:headerEnd]))
-	for headers.Scan() {
-		line := headers.Text()
-		if parts := strings.SplitN(line, ":", 2); len(parts) == 2 {
-			w.Header().Set(strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]))
-		}
-	}
-
-	w.Write(output[headerEnd+2:])
 }
 
 // Handle proxying
@@ -940,7 +875,7 @@ func (g *GubinNET) serveHostNotFoundPage(w http.ResponseWriter, r *http.Request,
 func getContentType(filePath string) string {
 	ext := strings.ToLower(filepath.Ext(filePath))
 	switch ext {
-	case ".html", ".php":
+	case ".html":
 		return "text/html; charset=utf-8"
 	case ".css":
 		return "text/css"
