@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/tls"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -23,8 +26,10 @@ import (
 
 // Constants for configuration directory
 const (
-	ConfigDir = "/etc/gubinnet/config"
-	LogDir    = "/etc/gubinnet/logs"
+	ConfigDir          = "/etc/gubinnet/config"
+	LogDir             = "/etc/gubinnet/logs"
+	ModulesDir         = "/etc/gubinnet/modules/cpp" // Directory for C++ modules
+	DefaultModuleIndex = "index.cpp"                 // Default module file name
 )
 
 // Prometheus Metrics
@@ -60,12 +65,13 @@ type VirtualHost struct {
 
 // Main Server Structure
 type GubinNET struct {
-	config   *ConfigParser
-	logger   *Logger
-	cache    map[string]*cacheEntry
-	mu       sync.Mutex
-	antiDDoS *AntiDDoS
-	servers  map[string]*http.Server
+	config       *ConfigParser
+	logger       *Logger
+	cache        map[string]*cacheEntry
+	mu           sync.Mutex
+	antiDDoS     *AntiDDoS
+	servers      map[string]*http.Server
+	moduleLogger *ModuleLogger // Logger for C++ modules
 }
 
 type cacheEntry struct {
@@ -155,6 +161,21 @@ func (l *Logger) StartAutoRotate() {
 	}()
 }
 
+// ========== MODULE LOGGER ==========
+type ModuleLogger struct {
+	logger *log.Logger
+}
+
+func NewModuleLogger() *ModuleLogger {
+	return &ModuleLogger{
+		logger: log.New(os.Stdout, "[MODULE] ", log.LstdFlags),
+	}
+}
+
+func (ml *ModuleLogger) Log(moduleName, message string) {
+	ml.logger.Printf("[%s] %s", moduleName, message)
+}
+
 // ========== ANTI-DDOS ==========
 type AntiDDoSConfig struct {
 	MaxRequestsPerSecond int
@@ -194,21 +215,25 @@ func (a *AntiDDoS) Middleware(next http.HandlerFunc) http.HandlerFunc {
 		a.mu.Lock()
 		defer a.mu.Unlock()
 		now := time.Now()
+
 		// Clean up expired bans
 		for ip, banTime := range a.bannedIPs {
 			if now.Sub(banTime) > a.cfg.BlockDuration {
 				delete(a.bannedIPs, ip)
 			}
 		}
+
 		if _, banned := a.bannedIPs[ip]; banned {
 			http.Error(w, "403 Forbidden", http.StatusForbidden)
 			a.logToFile(fmt.Sprintf("Blocked IP due to DDoS protection: %s", ip))
 			return
 		}
+
 		if now.Sub(a.timestamp) > time.Second {
 			a.ipCount = make(map[string]int)
 			a.timestamp = now
 		}
+
 		a.ipCount[ip]++
 		if a.ipCount[ip] > a.cfg.MaxRequestsPerSecond {
 			a.bannedIPs[ip] = now
@@ -216,6 +241,7 @@ func (a *AntiDDoS) Middleware(next http.HandlerFunc) http.HandlerFunc {
 			a.logToFile(fmt.Sprintf("Banned IP due to DDoS protection: %s", ip))
 			return
 		}
+
 		next(w, r)
 	}
 }
@@ -261,11 +287,12 @@ func main() {
 
 	// Initialize server
 	server := &GubinNET{
-		config:   config,
-		logger:   logger,
-		cache:    make(map[string]*cacheEntry),
-		antiDDoS: antiDDoS,
-		servers:  make(map[string]*http.Server),
+		config:       config,
+		logger:       logger,
+		cache:        make(map[string]*cacheEntry),
+		antiDDoS:     antiDDoS,
+		servers:      make(map[string]*http.Server),
+		moduleLogger: NewModuleLogger(), // Initialize module logger
 	}
 
 	// Start server
@@ -379,6 +406,7 @@ func parseVirtualHost(filePath string) (*VirtualHost, error) {
 func (g *GubinNET) applyNewConfig(newConfig *ConfigParser) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+
 	// Update existing hosts
 	for serverName, newHost := range newConfig.VirtualHosts {
 		if existingHost, exists := g.config.VirtualHosts[serverName]; exists {
@@ -397,6 +425,7 @@ func (g *GubinNET) applyNewConfig(newConfig *ConfigParser) {
 			g.startVirtualHost(newHost)
 		}
 	}
+
 	// Remove hosts that are not in the new configuration
 	for serverName := range g.config.VirtualHosts {
 		if _, exists := newConfig.VirtualHosts[serverName]; !exists {
@@ -442,6 +471,7 @@ func (g *GubinNET) startVirtualHost(host *VirtualHost) {
 	g.mu.Lock()
 	g.servers[host.ServerName] = server
 	g.mu.Unlock()
+
 	go func() {
 		var err error
 		if host.UseSSL {
@@ -466,6 +496,7 @@ func (g *GubinNET) stopVirtualHost(serverName string) {
 		delete(g.servers, serverName)
 	}
 	g.mu.Unlock()
+
 	if exists {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -476,6 +507,7 @@ func (g *GubinNET) stopVirtualHost(serverName string) {
 // Start the server
 func (g *GubinNET) Start() {
 	g.logger.Info("Starting server", nil)
+
 	// Start HTTP server
 	go func() {
 		httpServer := &http.Server{
@@ -490,6 +522,7 @@ func (g *GubinNET) Start() {
 			g.logger.Error("HTTP server error", map[string]interface{}{"error": err})
 		}
 	}()
+
 	// Start HTTPS server with SNI support
 	go func() {
 		certMap := make(map[string]tls.Certificate)
@@ -506,6 +539,7 @@ func (g *GubinNET) Start() {
 				certMap[host.ServerName] = cert
 			}
 		}
+
 		getCertificate := func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 			if cert, ok := certMap[hello.ServerName]; ok {
 				return &cert, nil
@@ -515,10 +549,12 @@ func (g *GubinNET) Start() {
 			})
 			return nil, fmt.Errorf("no certificate found for host: %s", hello.ServerName)
 		}
+
 		tlsConfig := &tls.Config{
 			GetCertificate: getCertificate,
 			MinVersion:     tls.VersionTLS12,
 		}
+
 		httpsServer := &http.Server{
 			Addr:         ":443",
 			Handler:      g.setupMiddleware(http.HandlerFunc(g.handleRequest)),
@@ -527,6 +563,7 @@ func (g *GubinNET) Start() {
 			WriteTimeout: 30 * time.Second,
 			IdleTimeout:  60 * time.Second,
 		}
+
 		g.logger.Info("HTTPS server started on port 443", nil)
 		if err := httpsServer.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
 			g.logger.Error("HTTPS server error", map[string]interface{}{"error": err})
@@ -540,22 +577,119 @@ func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
 		duration := time.Since(start).Seconds()
 		requestDuration.WithLabelValues(r.Method, r.URL.Path).Observe(duration)
 	}(time.Now())
+
 	// Generate unique Request ID
 	requestID := uuid.New().String()
 	w.Header().Set("X-Request-ID", requestID)
+
 	hostHeader := strings.Split(strings.TrimSuffix(r.Host, ";"), ":")[0]
 	host, exists := g.config.VirtualHosts[hostHeader]
+
 	if !exists || host.Root == "" {
 		g.serveHostNotFoundPage(w, r, requestID)
 		return
 	}
+
 	// Redirect to HTTPS
 	if host.RedirectToHTTPS && r.TLS == nil {
 		url := "https://" + hostHeader + r.URL.String()
 		http.Redirect(w, r, url, http.StatusPermanentRedirect)
 		return
 	}
+
+	// Check if it's a module request
+	if strings.HasPrefix(r.URL.Path, "/modules/") {
+		moduleName := strings.TrimPrefix(r.URL.Path, "/modules/")
+		modulePath := filepath.Join(ModulesDir, moduleName)
+		indexPath := filepath.Join(modulePath, DefaultModuleIndex)
+
+		// Check if module exists
+		if _, err := os.Stat(modulePath); os.IsNotExist(err) {
+			g.serveErrorPage(w, r, http.StatusNotFound, "Module Not Found", "", requestID)
+			return
+		}
+
+		// Check if index.cpp exists
+		if _, err := os.Stat(indexPath); os.IsNotExist(err) {
+			g.serveErrorPage(w, r, http.StatusNotFound, "Module Index File Not Found", "", requestID)
+			return
+		}
+
+		// Compile and run C++ module
+		output, err := runCppModule(modulePath, indexPath, w, r, g.moduleLogger)
+		if err != nil {
+			g.serveErrorPage(w, r, http.StatusInternalServerError, "Module Execution Error", err.Error(), requestID)
+			return
+		}
+
+		// Write output to response
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write(output)
+		return
+	}
+
 	g.serveFileOrSpa(w, r, host, requestID)
+}
+
+// Run C++ module
+func runCppModule(modulePath, filePath string, w http.ResponseWriter, r *http.Request, logger *ModuleLogger) ([]byte, error) {
+	// Create temporary directory for compilation
+	tempDir, err := os.MkdirTemp("", "cppmodule-*")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create temporary directory: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Copy source code to temporary directory
+	sourcePath := filepath.Join(tempDir, "main.cpp")
+	cmd := exec.Command("cp", "-r", modulePath+"/.", tempDir)
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("failed to copy module files: %v", err)
+	}
+
+	// Compile C++ code
+	objectPath := filepath.Join(tempDir, "output")
+	cmd = exec.Command("g++", sourcePath, "-o", objectPath, "-std=c++17", "-Wall", "-Wextra")
+	cmd.Dir = tempDir
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		logger.Log(filepath.Base(modulePath), fmt.Sprintf("Compilation failed: %v - %s", err, stderr.String()))
+		return nil, fmt.Errorf("compilation failed: %v - %s", err, stderr.String())
+	}
+
+	// Run compiled program
+	cmd = exec.Command(objectPath)
+	cmd.Dir = tempDir
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create stdout pipe: %v", err)
+	}
+
+	stderr = bytes.Buffer{}
+	cmd.Stderr = &stderr
+
+	if err := cmd.Start(); err != nil {
+		logger.Log(filepath.Base(modulePath), fmt.Sprintf("Execution failed: %v - %s", err, stderr.String()))
+		return nil, fmt.Errorf("execution failed: %v - %s", err, stderr.String())
+	}
+
+	// Read output
+	output, err := io.ReadAll(stdout)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read output: %v", err)
+	}
+
+	if err := cmd.Wait(); err != nil {
+		logger.Log(filepath.Base(modulePath), fmt.Sprintf("Program exited with error: %v - %s", err, stderr.String()))
+		return nil, fmt.Errorf("program exited with error: %v - %s", err, stderr.String())
+	}
+
+	logger.Log(filepath.Base(modulePath), fmt.Sprintf("Executed successfully, output size: %d bytes", len(output)))
+	return output, nil
 }
 
 // Serve file or SPA
@@ -565,8 +699,10 @@ func (g *GubinNET) serveFileOrSpa(w http.ResponseWriter, r *http.Request, host *
 		g.serveErrorPage(w, r, http.StatusInternalServerError, "Server configuration error", "", requestID)
 		return
 	}
+
 	requestPath := filepath.Clean(strings.TrimLeft(r.URL.Path, "/"))
 	fullPath := filepath.Join(webRootPath, requestPath)
+
 	fileInfo, err := os.Stat(fullPath)
 
 	// Check for index.html in directories
@@ -619,24 +755,28 @@ func (g *GubinNET) handleProxy(w http.ResponseWriter, r *http.Request, proxyURL 
 		g.serveErrorPage(w, r, http.StatusInternalServerError, "Internal Server Error", "", requestID)
 		return
 	}
+
 	// Copy headers
 	for key, values := range r.Header {
 		for _, value := range values {
 			req.Header.Add(key, value)
 		}
 	}
+
 	resp, err := client.Do(req)
 	if err != nil {
 		g.serveErrorPage(w, r, http.StatusBadGateway, "Bad Gateway", "", requestID)
 		return
 	}
 	defer resp.Body.Close()
+
 	// Copy response headers
 	for key, values := range resp.Header {
 		for _, value := range values {
 			w.Header().Add(key, value)
 		}
 	}
+
 	// Set status code and stream the response body
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
@@ -689,6 +829,7 @@ func (g *GubinNET) loggingMiddleware(next http.Handler) http.Handler {
 		}
 		requestsTotal.WithLabelValues(r.Method, r.URL.Path, strconv.Itoa(statusCode)).Inc()
 		activeConnections.Dec()
+
 		g.logger.Info("Request processed", map[string]interface{}{
 			"method":     r.Method,
 			"path":       r.URL.Path,
@@ -748,6 +889,7 @@ func (g *GubinNET) serveFile(w http.ResponseWriter, r *http.Request, filePath st
 	var found bool
 	cached, found = g.cache[filePath]
 	g.mu.Unlock()
+
 	if !found || (fileInfo != nil && fileInfo.ModTime().After(cached.modTime)) {
 		if fileInfo == nil {
 			var err error
@@ -757,30 +899,37 @@ func (g *GubinNET) serveFile(w http.ResponseWriter, r *http.Request, filePath st
 				return
 			}
 		}
+
 		content, err := os.ReadFile(filePath)
 		if err != nil {
 			g.serveErrorPage(w, r, http.StatusInternalServerError, "Internal Server Error", "", requestID)
 			return
 		}
+
 		cached = &cacheEntry{
 			content:     content,
 			modTime:     fileInfo.ModTime(),
 			size:        fileInfo.Size(),
 			contentType: getContentType(filePath),
 		}
+
 		g.mu.Lock()
 		g.cache[filePath] = cached
 		g.mu.Unlock()
 	}
+
 	w.Header().Set("Content-Type", cached.contentType)
 	w.Header().Set("Content-Length", strconv.FormatInt(cached.size, 10))
 	w.Header().Set("Last-Modified", cached.modTime.Format(http.TimeFormat))
+
 	etag := fmt.Sprintf(`"%x-%x"`, cached.modTime.Unix(), cached.size)
 	w.Header().Set("ETag", etag)
+
 	if match := r.Header.Get("If-None-Match"); match == etag {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
+
 	if modSince := r.Header.Get("If-Modified-Since"); modSince != "" {
 		modTime, err := http.ParseTime(modSince)
 		if err == nil && cached.modTime.Before(modTime.Add(time.Second)) {
@@ -788,6 +937,7 @@ func (g *GubinNET) serveFile(w http.ResponseWriter, r *http.Request, filePath st
 			return
 		}
 	}
+
 	if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
 		w.Header().Set("Content-Encoding", "gzip")
 		gz := gzip.NewWriter(w)
@@ -810,8 +960,10 @@ func (g *GubinNET) serveErrorPage(w http.ResponseWriter, r *http.Request, status
 		"user_agent": r.UserAgent(),
 		"request_id": requestID,
 	})
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(statusCode)
+
 	html := fmt.Sprintf(`
 <!DOCTYPE html>
 <html lang="en">
@@ -834,6 +986,7 @@ func (g *GubinNET) serveErrorPage(w http.ResponseWriter, r *http.Request, status
 </body>
 </html>
 `, statusCode, statusCode, message, details, requestID)
+
 	w.Write([]byte(html))
 }
 
@@ -846,8 +999,10 @@ func (g *GubinNET) serveHostNotFoundPage(w http.ResponseWriter, r *http.Request,
 		"user_agent": r.UserAgent(),
 		"request_id": requestID,
 	})
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusNotFound)
+
 	html := `
 <!DOCTYPE html>
 <html lang="en">
@@ -868,6 +1023,7 @@ func (g *GubinNET) serveHostNotFoundPage(w http.ResponseWriter, r *http.Request,
 </body>
 </html>
 `
+
 	w.Write([]byte(html))
 }
 
