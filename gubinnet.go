@@ -7,36 +7,33 @@ package main
 #include <stdlib.h>
 
 typedef char* (*process_func)(const char*);
-
 void* load_library(const char* path) {
     return dlopen(path, RTLD_LAZY);
 }
-
 process_func get_process_function(void* handle) {
     return (process_func)dlsym(handle, "process");
 }
-
 char* call_process(process_func fn, const char* input) {
     if (!fn) return NULL;
     return fn(input);
 }
-
 void free_library(void* handle) {
     dlclose(handle);
 }
 */
 import "C"
 import (
-	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
 	"crypto/tls"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"regexp"
@@ -50,6 +47,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // Константы
@@ -58,6 +56,7 @@ const (
 	LogDir             = "/etc/gubinnet/logs"
 	ModulesDir         = "/etc/gubinnet/modules"
 	DefaultModuleIndex = "module.cpp"
+	PublicKeyPath      = "/etc/gubinnet/gubinnet.pub"
 )
 
 // Prometheus метрики
@@ -66,19 +65,23 @@ var (
 		Name: "http_requests_total",
 		Help: "Всего HTTP-запросов",
 	}, []string{"method", "path", "status"})
+
 	requestDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "http_request_duration_seconds",
 		Help:    "Длительность HTTP-запросов",
 		Buckets: []float64{0.1, 0.5, 1, 2.5, 5, 10},
 	}, []string{"method", "path"})
+
 	activeConnections = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "http_active_connections",
 		Help: "Активные соединения",
 	})
+
 	moduleExecutions = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "module_executions_total",
 		Help: "Вызовы модулей",
 	}, []string{"language", "name"})
+
 	moduleErrors = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "module_errors_total",
 		Help: "Ошибки при выполнении модулей",
@@ -108,8 +111,9 @@ type GubinNET struct {
 	antiDDoS     *AntiDDoS
 	servers      map[string]*http.Server
 	moduleLogger *ModuleLogger
-	modules      map[string]Module // фоновые модули
+	modules      map[string]Module
 	moduleWG     sync.WaitGroup
+	pubKey       ed25519.PublicKey
 }
 
 type cacheEntry struct {
@@ -164,7 +168,7 @@ func (l *Logger) log(level, msg string, fields map[string]interface{}) {
 		for k, v := range fields {
 			fieldsStr += fmt.Sprintf(`"%s":%q,`, k, v)
 		}
-		if len(fieldsStr) > 0 && strings.HasSuffix(fieldsStr, ",") {
+		if len(fieldsStr) > 1 && fieldsStr[len(fieldsStr)-1] == ',' {
 			fieldsStr = fieldsStr[:len(fieldsStr)-1]
 		}
 		fieldsStr += "}"
@@ -232,7 +236,10 @@ type AntiDDoS struct {
 
 func NewAntiDDoS(cfg *AntiDDoSConfig) (*AntiDDoS, error) {
 	if cfg.LogFilePath == "" {
-		cfg.LogFilePath = "/tmp/antiddos.log"
+		cfg.LogFilePath = filepath.Join(LogDir, "antiddos.log")
+	}
+	if err := os.MkdirAll(filepath.Dir(cfg.LogFilePath), 0755); err != nil {
+		return nil, err
 	}
 	logFile, err := os.OpenFile(cfg.LogFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
@@ -254,6 +261,7 @@ func (a *AntiDDoS) Middleware(next http.HandlerFunc) http.HandlerFunc {
 		defer a.mu.Unlock()
 		now := time.Now()
 
+		// Очистка старых банов
 		for ip, banTime := range a.bannedIPs {
 			if now.Sub(banTime) > a.cfg.BlockDuration {
 				delete(a.bannedIPs, ip)
@@ -321,7 +329,6 @@ func NewCGOModule(name, path string, logger *ModuleLogger, interval time.Duratio
 func (m *CGOModule) Start() {
 	m.running = true
 	m.logger.Log(m.Name, "Starting background module")
-
 	module := C.load_library(C.CString(m.Path))
 	if module == nil {
 		moduleErrors.WithLabelValues("cgo", m.Name).Inc()
@@ -329,7 +336,6 @@ func (m *CGOModule) Start() {
 		return
 	}
 	m.handle = module
-
 	processFn := C.get_process_function(module)
 	if processFn == nil {
 		moduleErrors.WithLabelValues("cgo", m.Name).Inc()
@@ -365,13 +371,11 @@ func (m *CGOModule) Process(input string) string {
 	}
 	cInput := C.CString(input)
 	defer C.free(unsafe.Pointer(cInput))
-
 	result := C.call_process(m.fn, cInput)
 	if result == nil {
 		moduleErrors.WithLabelValues("cgo", m.Name).Inc()
 		return "Module returned NULL"
 	}
-
 	output := C.GoString(result)
 	moduleExecutions.WithLabelValues("cgo", m.Name).Inc()
 	C.free(unsafe.Pointer(result))
@@ -385,275 +389,67 @@ func (g *GubinNET) startBackgroundModules() {
 		g.logger.Warning("No modules directory found", map[string]interface{}{"error": err})
 		return
 	}
-
 	for _, file := range files {
 		if file.IsDir() {
 			moduleDir := filepath.Join(ModulesDir, file.Name())
 			moduleSo := filepath.Join(moduleDir, "module.so")
-			if _, err := os.Stat(moduleSo); err == nil {
-				module := NewCGOModule(file.Name(), moduleSo, g.moduleLogger, 10*time.Second)
-				module.Start()
-				g.modules[file.Name()] = module
+			sigPath := filepath.Join(moduleDir, "module.so.sig")
+
+			if _, err := os.Stat(moduleSo); err != nil {
+				continue
 			}
-		}
-	}
-}
-
-func (g *GubinNET) gracefulShutdown() {
-	var wg sync.WaitGroup
-	for serverName, server := range g.servers {
-		wg.Add(1)
-		go func(name string, srv *http.Server) {
-			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			server.Shutdown(ctx)
-		}(serverName, server)
-	}
-	wg.Wait()
-
-	// Остановить фоновые модули
-	for _, module := range g.modules {
-		module.Stop()
-	}
-}
-
-func (g *GubinNET) applyNewConfig(newConfig *ConfigParser) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	for serverName, newHost := range newConfig.VirtualHosts {
-		if existingHost, exists := g.config.VirtualHosts[serverName]; exists {
-			existingHost.ServerName = newHost.ServerName
-			existingHost.ListenPort = newHost.ListenPort
-			existingHost.Root = newHost.Root
-			existingHost.Index = newHost.Index
-			existingHost.TryFiles = newHost.TryFiles
-			existingHost.UseSSL = newHost.UseSSL
-			existingHost.CertPath = newHost.CertPath
-			existingHost.KeyPath = newHost.KeyPath
-			existingHost.RedirectToHTTPS = newHost.RedirectToHTTPS
-			existingHost.ProxyURL = newHost.ProxyURL
-		} else {
-			g.config.VirtualHosts[serverName] = newHost
-			g.startVirtualHost(newHost)
-		}
-	}
-	for serverName := range g.config.VirtualHosts {
-		if _, exists := newConfig.VirtualHosts[serverName]; !exists {
-			g.stopVirtualHost(serverName)
-			delete(g.config.VirtualHosts, serverName)
-		}
-	}
-}
-
-func (g *GubinNET) Start() {
-	g.logger.Info("Starting server", nil)
-	g.startBackgroundModules()
-
-	go func() {
-		httpServer := &http.Server{
-			Addr:         ":80",
-			Handler:      g.setupMiddleware(http.HandlerFunc(g.handleRequest)),
-			ReadTimeout:  30 * time.Second,
-			WriteTimeout: 30 * time.Second,
-			IdleTimeout:  60 * time.Second,
-		}
-		g.logger.Info("HTTP server started on port 80", nil)
-		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			g.logger.Error("HTTP server error", map[string]interface{}{"error": err})
-		}
-	}()
-
-	go func() {
-		certMap := make(map[string]tls.Certificate)
-		for _, host := range g.config.VirtualHosts {
-			if host.UseSSL {
-				cert, err := tls.LoadX509KeyPair(host.CertPath, host.KeyPath)
-				if err != nil {
-					g.logger.Error("Failed to load SSL certificate", map[string]interface{}{
-						"server_name": host.ServerName,
-						"error":       err,
-					})
-					continue
-				}
-				certMap[host.ServerName] = cert
+			if !verifySignature(moduleSo, sigPath, g.pubKey) {
+				g.logger.Error("Module signature verification failed", map[string]interface{}{"module": file.Name()})
+				continue
 			}
-		}
-		getCertificate := func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-			if cert, ok := certMap[hello.ServerName]; ok {
-				return &cert, nil
-			}
-			g.logger.Warning("No certificate found for host", map[string]interface{}{
-				"host": hello.ServerName,
-			})
-			return nil, fmt.Errorf("no certificate found for host: %s", hello.ServerName)
-		}
-		tlsConfig := &tls.Config{
-			GetCertificate: getCertificate,
-			MinVersion:     tls.VersionTLS12,
-		}
-		httpsServer := &http.Server{
-			Addr:         ":443",
-			Handler:      g.setupMiddleware(http.HandlerFunc(g.handleRequest)),
-			TLSConfig:    tlsConfig,
-			ReadTimeout:  30 * time.Second,
-			WriteTimeout: 30 * time.Second,
-			IdleTimeout:  60 * time.Second,
-		}
-		g.logger.Info("HTTPS server started on port 443", nil)
-		if err := httpsServer.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
-			g.logger.Error("HTTPS server error", map[string]interface{}{"error": err})
-		}
-	}()
-}
 
-func (g *GubinNET) startVirtualHost(host *VirtualHost) {
-	server := &http.Server{
-		Addr:         fmt.Sprintf(":%d", host.ListenPort),
-		Handler:      g.setupMiddleware(http.HandlerFunc(g.handleRequest)),
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  60 * time.Second,
-	}
-	if host.UseSSL {
-		cert, err := tls.LoadX509KeyPair(host.CertPath, host.KeyPath)
-		if err == nil {
-			server.TLSConfig = &tls.Config{
-				Certificates: []tls.Certificate{cert},
-				MinVersion:   tls.VersionTLS12,
-			}
-		}
-	}
-	g.mu.Lock()
-	g.servers[host.ServerName] = server
-	g.mu.Unlock()
-	go func() {
-		var err error
-		if host.UseSSL {
-			err = server.ListenAndServeTLS("", "")
-		} else {
-			err = server.ListenAndServe()
-		}
-		if err != nil && err != http.ErrServerClosed {
-			g.logger.Error("Server error", map[string]interface{}{
-				"server_name": host.ServerName,
-				"error":       err,
-			})
-		}
-	}()
-}
-
-func (g *GubinNET) stopVirtualHost(serverName string) {
-	g.mu.Lock()
-	server, exists := g.servers[serverName]
-	if exists {
-		delete(g.servers, serverName)
-	}
-	g.mu.Unlock()
-	if exists {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		server.Shutdown(ctx)
-	}
-}
-
-func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
-	defer func(start time.Time) {
-		duration := time.Since(start).Seconds()
-		requestDuration.WithLabelValues(r.Method, r.URL.Path).Observe(duration)
-	}(time.Now())
-
-	requestID := uuid.New().String()
-	w.Header().Set("X-Request-ID", requestID)
-	hostHeader := strings.Split(strings.TrimSuffix(r.Host, ";"), ":")[0]
-	host, exists := g.config.VirtualHosts[hostHeader]
-	if !exists || host.Root == "" {
-		g.serveHostNotFoundPage(w, r, requestID)
-		return
-	}
-
-	if host.RedirectToHTTPS && r.TLS == nil {
-		url := "https://" + hostHeader + r.URL.String()
-		http.Redirect(w, r, url, http.StatusPermanentRedirect)
-		return
-	}
-
-	if strings.HasPrefix(r.URL.Path, "/modules/") {
-		moduleName := strings.TrimPrefix(r.URL.Path, "/modules/")
-		moduleDir := filepath.Join(ModulesDir, moduleName)
-		moduleSo := filepath.Join(moduleDir, "module.so")
-		indexCpp := filepath.Join(moduleDir, DefaultModuleIndex)
-
-		if _, err := os.Stat(moduleDir); os.IsNotExist(err) {
-			g.serveErrorPage(w, r, http.StatusNotFound, "Module Not Found", "", requestID)
-			return
-		}
-
-		if _, err := os.Stat(moduleSo); os.IsNotExist(err) {
-			if _, err := os.Stat(indexCpp); os.IsNotExist(err) {
-				g.serveErrorPage(w, r, http.StatusNotFound, "Module Index File Not Found", "", requestID)
-				return
-			}
-			if err := compileCppModule(moduleDir, indexCpp); err != nil {
-				g.serveErrorPage(w, r, http.StatusInternalServerError, "Compilation Failed", err.Error(), requestID)
-				return
-			}
-		}
-
-		module, exists := g.modules[moduleName]
-		if !exists {
-			module = NewCGOModule(moduleName, moduleSo, g.moduleLogger, 10*time.Second)
+			module := NewCGOModule(file.Name(), moduleSo, g.moduleLogger, 10*time.Second)
 			module.Start()
-			g.modules[moduleName] = module
+			g.modules[file.Name()] = module
 		}
-
-		input := r.URL.Query().Get("input")
-		output := module.Process(input)
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		fmt.Fprint(w, output)
-		return
 	}
-
-	g.serveFileOrSpa(w, r, host, requestID)
 }
 
-func compileCppModule(moduleDir, sourcePath string) error {
-	tempDir, err := os.MkdirTemp("", "cppmod-*")
+// Проверка подписи
+func verifySignature(dataPath, sigPath string, pubKey ed25519.PublicKey) bool {
+	sig, err := ioutil.ReadFile(sigPath)
 	if err != nil {
-		return err
+		return false
 	}
-	defer os.RemoveAll(tempDir)
-
-	cmd := exec.Command("cp", "-r", moduleDir+"/.", tempDir)
-	if err := cmd.Run(); err != nil {
-		return err
+	data, err := ioutil.ReadFile(dataPath)
+	if err != nil {
+		return false
 	}
-
-	objectPath := filepath.Join(tempDir, "module.so")
-	cmd = exec.Command("g++", "-shared", "-fPIC", "module.cpp", "-o", objectPath)
-	cmd.Dir = tempDir
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("compilation failed: %v - %s", err, stderr.String())
-	}
-
-	targetSo := filepath.Join(moduleDir, "module.so")
-	os.Remove(targetSo)
-	return os.Rename(objectPath, targetSo)
+	hash := sha256.Sum256(data)
+	return ed25519.Verify(pubKey, hash[:], sig)
 }
 
-func findModuleBinary(dir string) (string, error) {
-	for _, ext := range []string{".so", ".dylib", ".dll"} {
-		path := filepath.Join(dir, "module"+ext)
-		if _, err := os.Stat(path); err == nil {
-			return path, nil
-		}
+// Загрузка публичного ключа
+func loadPublicKey(path string) (ed25519.PublicKey, error) {
+	data, err := ioutil.ReadFile(path)
+	if err != nil {
+		return nil, err
 	}
-	return "", fmt.Errorf("no module binary found")
+	return ed25519.PublicKey(data), nil
 }
 
+// Безопасное соединение путей
+func safeJoin(root, path string) (string, error) {
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	absPath, err := filepath.Abs(filepath.Join(root, path))
+	if err != nil {
+		return "", err
+	}
+	if !strings.HasPrefix(absPath, absRoot) {
+		return "", fmt.Errorf("forbidden path")
+	}
+	return absPath, nil
+}
+
+// Получение IP-адреса
 func getRealIP(r *http.Request) string {
 	ip := r.Header.Get("X-Real-IP")
 	if ip == "" {
@@ -662,6 +458,7 @@ func getRealIP(r *http.Request) string {
 	return ip
 }
 
+// Определение Content-Type
 func getContentType(filePath string) string {
 	ext := strings.ToLower(filepath.Ext(filePath))
 	switch ext {
@@ -684,16 +481,94 @@ func getContentType(filePath string) string {
 	}
 }
 
+// Обработчик запроса
+func (g *GubinNET) handleRequest(w http.ResponseWriter, r *http.Request) {
+	defer func(start time.Time) {
+		duration := time.Since(start).Seconds()
+		requestDuration.WithLabelValues(r.Method, r.URL.Path).Observe(duration)
+	}(time.Now())
+
+	requestID := uuid.New().String()
+	w.Header().Set("X-Request-ID", requestID)
+
+	// Security headers
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("X-XSS-Protection", "1; mode=block")
+	w.Header().Set("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
+
+	hostHeader := strings.Split(strings.TrimSuffix(r.Host, ";"), ":")[0]
+	host, exists := g.config.VirtualHosts[hostHeader]
+	if !exists || host.Root == "" {
+		g.serveHostNotFoundPage(w, r, requestID)
+		return
+	}
+
+	if host.RedirectToHTTPS && r.TLS == nil {
+		url := "https://" + hostHeader + r.URL.String()
+		http.Redirect(w, r, url, http.StatusPermanentRedirect)
+		return
+	}
+
+	if strings.HasPrefix(r.URL.Path, "/modules/") {
+		moduleName := strings.TrimPrefix(r.URL.Path, "/modules/")
+		moduleDir := filepath.Join(ModulesDir, moduleName)
+		moduleSo := filepath.Join(moduleDir, "module.so")
+		sigPath := filepath.Join(moduleDir, "module.so.sig")
+
+		if _, err := os.Stat(moduleDir); os.IsNotExist(err) {
+			g.serveErrorPage(w, r, http.StatusNotFound, "Module Not Found", "", requestID)
+			return
+		}
+
+		if _, err := os.Stat(moduleSo); os.IsNotExist(err) {
+			g.serveErrorPage(w, r, http.StatusNotFound, "Module binary not found", "Precompiled module.so is missing and dynamic compilation is disabled.", requestID)
+			return
+		}
+
+		if !verifySignature(moduleSo, sigPath, g.pubKey) {
+			g.serveErrorPage(w, r, http.StatusForbidden, "Module signature invalid", "Module has been tampered with or is not signed.", requestID)
+			return
+		}
+
+		module, exists := g.modules[moduleName]
+		if !exists {
+			module = NewCGOModule(moduleName, moduleSo, g.moduleLogger, 10*time.Second)
+			module.Start()
+			g.modules[moduleName] = module
+		}
+
+		input := r.URL.Query().Get("input")
+		output := module.Process(input)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		fmt.Fprint(w, output)
+		return
+	}
+
+	g.serveFileOrSpa(w, r, host, requestID)
+}
+
+// Обслуживание файла или SPA
 func (g *GubinNET) serveFileOrSpa(w http.ResponseWriter, r *http.Request, host *VirtualHost, requestID string) {
 	webRootPath := host.Root
 	if webRootPath == "" {
 		g.serveErrorPage(w, r, http.StatusInternalServerError, "Server configuration error", "", requestID)
 		return
 	}
-	requestPath := filepath.Clean(strings.TrimLeft(r.URL.Path, "/"))
-	fullPath := filepath.Join(webRootPath, requestPath)
-	fileInfo, err := os.Stat(fullPath)
 
+	requestPath := strings.TrimLeft(r.URL.Path, "/")
+	if strings.Contains(requestPath, "..") {
+		g.serveErrorPage(w, r, http.StatusForbidden, "Invalid path", "", requestID)
+		return
+	}
+
+	fullPath, err := safeJoin(webRootPath, requestPath)
+	if err != nil {
+		g.serveErrorPage(w, r, http.StatusForbidden, "Invalid path", "", requestID)
+		return
+	}
+
+	fileInfo, err := os.Stat(fullPath)
 	if err == nil && fileInfo.IsDir() {
 		indexFiles := []string{"index.html", "index.htm", "default.htm"}
 		for _, index := range indexFiles {
@@ -713,7 +588,8 @@ func (g *GubinNET) serveFileOrSpa(w http.ResponseWriter, r *http.Request, host *
 
 	if len(host.TryFiles) > 0 {
 		for _, tryFile := range host.TryFiles {
-			tryPath := filepath.Join(webRootPath, strings.Replace(tryFile, "$uri", requestPath, 1))
+			uri := strings.Replace(tryFile, "$uri", requestPath, -1)
+			tryPath, _ := safeJoin(webRootPath, uri)
 			if _, err := os.Stat(tryPath); err == nil {
 				g.serveFile(w, r, tryPath, nil, requestID)
 				return
@@ -726,9 +602,10 @@ func (g *GubinNET) serveFileOrSpa(w http.ResponseWriter, r *http.Request, host *
 		return
 	}
 
-	g.serveErrorPage(w, r, http.StatusNotFound, "File Not Found", fmt.Sprintf("File '%s' does not exist in root path '%s'", requestPath, webRootPath), requestID)
+	g.serveErrorPage(w, r, http.StatusNotFound, "File Not Found", "", requestID)
 }
 
+// Проксирование
 func (g *GubinNET) handleProxy(w http.ResponseWriter, r *http.Request, proxyURL string, requestID string) {
 	client := &http.Client{
 		Timeout: 10 * time.Second,
@@ -758,68 +635,7 @@ func (g *GubinNET) handleProxy(w http.ResponseWriter, r *http.Request, proxyURL 
 	io.Copy(w, resp.Body)
 }
 
-func (g *GubinNET) securityMiddleware(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		path := strings.ToLower(r.URL.Path)
-		re := regexp.MustCompile(`(\.\./|%2e%2e|\.env|phpmyadmin|shell|setup-config.php|device\.rsp)`)
-		if re.MatchString(path) {
-			ip := getRealIP(r)
-			g.logger.Warning("Blocked suspicious request", map[string]interface{}{
-				"path":       path,
-				"ip":         ip,
-				"request_id": w.Header().Get("X-Request-ID"),
-			})
-			g.serveErrorPage(w, r, http.StatusForbidden, "Access Denied", "", w.Header().Get("X-Request-ID"))
-			return
-		}
-		next(w, r)
-	}
-}
-
-func (g *GubinNET) loggingMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-		wrapped := &responseWriterWrapper{w: w}
-		next.ServeHTTP(wrapped, r)
-		duration := time.Since(start).Seconds()
-		statusCode := wrapped.status
-		if statusCode == 0 {
-			statusCode = http.StatusOK
-		}
-		requestsTotal.WithLabelValues(r.Method, r.URL.Path, strconv.Itoa(statusCode)).Inc()
-		activeConnections.Dec()
-		g.logger.Info("Request processed", map[string]interface{}{
-			"method":     r.Method,
-			"path":       r.URL.Path,
-			"status":     statusCode,
-			"duration":   duration,
-			"remote":     r.RemoteAddr,
-			"user_agent": r.UserAgent(),
-			"request_id": w.Header().Get("X-Request-ID"),
-		})
-	})
-}
-
-func (g *GubinNET) metricsMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		activeConnections.Inc()
-		defer activeConnections.Dec()
-		next.ServeHTTP(w, r)
-	})
-}
-
-func (g *GubinNET) setupMiddleware(handler http.Handler) http.Handler {
-	return g.securityMiddleware(
-		g.antiDDoS.Middleware(
-			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				g.loggingMiddleware(
-					g.metricsMiddleware(handler),
-				).ServeHTTP(w, r)
-			}),
-		),
-	)
-}
-
+// Обслуживание файла
 func (g *GubinNET) serveFile(w http.ResponseWriter, r *http.Request, filePath string, fileInfo os.FileInfo, requestID string) {
 	g.mu.Lock()
 	var cached *cacheEntry
@@ -881,6 +697,7 @@ func (g *GubinNET) serveFile(w http.ResponseWriter, r *http.Request, filePath st
 	}
 }
 
+// Отправка страницы ошибки
 func (g *GubinNET) serveErrorPage(w http.ResponseWriter, r *http.Request, statusCode int, message string, details string, requestID string) {
 	g.logger.Error("Error page served", map[string]interface{}{
 		"path":       r.URL.Path,
@@ -911,7 +728,7 @@ func (g *GubinNET) serveErrorPage(w http.ResponseWriter, r *http.Request, status
     <h1>Error %d</h1>
     <p>%s</p>
     <p>Details: %s</p>
-    <p>Server: GubinNET/1.5.1</p>
+    <p>Server: GubinNET/1.6.1</p>
     <p>Request ID: %s</p>
 </body>
 </html>
@@ -919,6 +736,7 @@ func (g *GubinNET) serveErrorPage(w http.ResponseWriter, r *http.Request, status
 	w.Write([]byte(html))
 }
 
+// Страница "Хост не найден"
 func (g *GubinNET) serveHostNotFoundPage(w http.ResponseWriter, r *http.Request, requestID string) {
 	g.logger.Error("Host not found page served", map[string]interface{}{
 		"path":       r.URL.Path,
@@ -945,14 +763,80 @@ func (g *GubinNET) serveHostNotFoundPage(w http.ResponseWriter, r *http.Request,
 <body>
     <h1>Host Not Found</h1>
     <p>The requested host could not be found on this server.</p>
-    <p>Server: GubinNET/1.5.1</p>
+    <p>Server: GubinNET/1.6.1</p>
 </body>
 </html>
 `
 	w.Write([]byte(html))
 }
 
-// responseWriterWrapper для захвата статус-кода
+// Middleware: безопасность
+func (g *GubinNET) securityMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		path := strings.ToLower(r.URL.Path)
+		re := regexp.MustCompile(`(\.\./|%2e%2e|\.env|phpmyadmin|shell|setup-config\.php|device\.rsp)`)
+		if re.MatchString(path) {
+			ip := getRealIP(r)
+			g.logger.Warning("Blocked suspicious request", map[string]interface{}{
+				"path":       path,
+				"ip":         ip,
+				"request_id": w.Header().Get("X-Request-ID"),
+			})
+			g.serveErrorPage(w, r, http.StatusForbidden, "Access Denied", "", w.Header().Get("X-Request-ID"))
+			return
+		}
+		next(w, r)
+	}
+}
+
+// Middleware: логирование
+func (g *GubinNET) loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		wrapped := &responseWriterWrapper{w: w}
+		next.ServeHTTP(wrapped, r)
+		duration := time.Since(start).Seconds()
+		statusCode := wrapped.status
+		if statusCode == 0 {
+			statusCode = http.StatusOK
+		}
+		requestsTotal.WithLabelValues(r.Method, r.URL.Path, strconv.Itoa(statusCode)).Inc()
+		activeConnections.Dec()
+		g.logger.Info("Request processed", map[string]interface{}{
+			"method":     r.Method,
+			"path":       r.URL.Path,
+			"status":     statusCode,
+			"duration":   duration,
+			"remote":     r.RemoteAddr,
+			"user_agent": r.UserAgent(),
+			"request_id": w.Header().Get("X-Request-ID"),
+		})
+	})
+}
+
+// Middleware: метрики
+func (g *GubinNET) metricsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		activeConnections.Inc()
+		defer activeConnections.Dec()
+		next.ServeHTTP(w, r)
+	})
+}
+
+// Комбинированный middleware
+func (g *GubinNET) setupMiddleware(handler http.Handler) http.Handler {
+	return g.securityMiddleware(
+		g.antiDDoS.Middleware(
+			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				g.loggingMiddleware(
+					g.metricsMiddleware(handler),
+				).ServeHTTP(w, r)
+			}),
+		),
+	)
+}
+
+// Обёртка для ResponseWriter
 type responseWriterWrapper struct {
 	w      http.ResponseWriter
 	status int
@@ -1009,7 +893,7 @@ func loadConfiguration(configDir string, logger *Logger) *ConfigParser {
 	return config
 }
 
-// Парсинг INI файла
+// Парсинг INI
 func parseVirtualHost(filePath string) (*VirtualHost, error) {
 	host := &VirtualHost{}
 	data, err := os.ReadFile(filePath)
@@ -1054,7 +938,186 @@ func parseVirtualHost(filePath string) (*VirtualHost, error) {
 	return host, nil
 }
 
-// Main function
+// Graceful shutdown
+func (g *GubinNET) gracefulShutdown() {
+	var wg sync.WaitGroup
+	for serverName, server := range g.servers {
+		wg.Add(1)
+		go func(name string, srv *http.Server) {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			server.Shutdown(ctx)
+		}(serverName, server)
+	}
+	wg.Wait()
+	for _, module := range g.modules {
+		module.Stop()
+	}
+}
+
+// Применение новой конфигурации
+func (g *GubinNET) applyNewConfig(newConfig *ConfigParser) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for serverName, newHost := range newConfig.VirtualHosts {
+		if existingHost, exists := g.config.VirtualHosts[serverName]; exists {
+			existingHost.ServerName = newHost.ServerName
+			existingHost.ListenPort = newHost.ListenPort
+			existingHost.Root = newHost.Root
+			existingHost.Index = newHost.Index
+			existingHost.TryFiles = newHost.TryFiles
+			existingHost.UseSSL = newHost.UseSSL
+			existingHost.CertPath = newHost.CertPath
+			existingHost.KeyPath = newHost.KeyPath
+			existingHost.RedirectToHTTPS = newHost.RedirectToHTTPS
+			existingHost.ProxyURL = newHost.ProxyURL
+		} else {
+			g.config.VirtualHosts[serverName] = newHost
+			g.startVirtualHost(newHost)
+		}
+	}
+	for serverName := range g.config.VirtualHosts {
+		if _, exists := newConfig.VirtualHosts[serverName]; !exists {
+			g.stopVirtualHost(serverName)
+			delete(g.config.VirtualHosts, serverName)
+		}
+	}
+}
+
+// Запуск виртуального хоста
+func (g *GubinNET) startVirtualHost(host *VirtualHost) {
+	server := &http.Server{
+		Addr:         fmt.Sprintf(":%d", host.ListenPort),
+		Handler:      g.setupMiddleware(http.HandlerFunc(g.handleRequest)),
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
+	if host.UseSSL {
+		cert, err := tls.LoadX509KeyPair(host.CertPath, host.KeyPath)
+		if err == nil {
+			server.TLSConfig = &tls.Config{
+				Certificates: []tls.Certificate{cert},
+				MinVersion:   tls.VersionTLS12,
+			}
+		}
+	}
+	g.mu.Lock()
+	g.servers[host.ServerName] = server
+	g.mu.Unlock()
+	go func() {
+		var err error
+		if host.UseSSL {
+			err = server.ListenAndServeTLS("", "")
+		} else {
+			err = server.ListenAndServe()
+		}
+		if err != nil && err != http.ErrServerClosed {
+			g.logger.Error("Server error", map[string]interface{}{
+				"server_name": host.ServerName,
+				"error":       err,
+			})
+		}
+	}()
+}
+
+// Остановка виртуального хоста
+func (g *GubinNET) stopVirtualHost(serverName string) {
+	g.mu.Lock()
+	server, exists := g.servers[serverName]
+	if exists {
+		delete(g.servers, serverName)
+	}
+	g.mu.Unlock()
+	if exists {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		server.Shutdown(ctx)
+	}
+}
+
+// Запуск сервера
+func (g *GubinNET) Start() {
+	g.logger.Info("Starting server", nil)
+	g.startBackgroundModules()
+
+	// Metrics и pprof
+	go func() {
+		http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("OK"))
+		})
+		http.Handle("/metrics", promhttp.Handler())
+		log.Println("Metrics server started on :9090")
+		http.ListenAndServe(":9090", nil)
+	}()
+
+	go func() {
+		log.Println("pprof server started on :6060")
+		http.ListenAndServe(":6060", nil)
+	}()
+
+	// HTTP
+	go func() {
+		httpServer := &http.Server{
+			Addr:         ":80",
+			Handler:      g.setupMiddleware(http.HandlerFunc(g.handleRequest)),
+			ReadTimeout:  30 * time.Second,
+			WriteTimeout: 30 * time.Second,
+			IdleTimeout:  60 * time.Second,
+		}
+		g.logger.Info("HTTP server started on port 80", nil)
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			g.logger.Error("HTTP server error", map[string]interface{}{"error": err})
+		}
+	}()
+
+	// HTTPS
+	go func() {
+		certMap := make(map[string]tls.Certificate)
+		for _, host := range g.config.VirtualHosts {
+			if host.UseSSL {
+				cert, err := tls.LoadX509KeyPair(host.CertPath, host.KeyPath)
+				if err != nil {
+					g.logger.Error("Failed to load SSL certificate", map[string]interface{}{
+						"server_name": host.ServerName,
+						"error":       err,
+					})
+					continue
+				}
+				certMap[host.ServerName] = cert
+			}
+		}
+		getCertificate := func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			if cert, ok := certMap[hello.ServerName]; ok {
+				return &cert, nil
+			}
+			g.logger.Warning("No certificate found for host", map[string]interface{}{
+				"host": hello.ServerName,
+			})
+			return nil, fmt.Errorf("no certificate found for host: %s", hello.ServerName)
+		}
+		tlsConfig := &tls.Config{
+			GetCertificate: getCertificate,
+			MinVersion:     tls.VersionTLS12,
+		}
+		httpsServer := &http.Server{
+			Addr:         ":443",
+			Handler:      g.setupMiddleware(http.HandlerFunc(g.handleRequest)),
+			TLSConfig:    tlsConfig,
+			ReadTimeout:  30 * time.Second,
+			WriteTimeout: 30 * time.Second,
+			IdleTimeout:  60 * time.Second,
+		}
+		g.logger.Info("HTTPS server started on port 443", nil)
+		if err := httpsServer.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+			g.logger.Error("HTTPS server error", map[string]interface{}{"error": err})
+		}
+	}()
+}
+
+// Main
 func main() {
 	logger := NewLogger(LogDir, true)
 	if logger == nil {
@@ -1063,6 +1126,12 @@ func main() {
 	}
 	logger.StartAutoRotate()
 	defer logger.Close()
+
+	pubKey, err := loadPublicKey(PublicKeyPath)
+	if err != nil {
+		logger.Error("Failed to load public key", map[string]interface{}{"error": err})
+		os.Exit(1)
+	}
 
 	config := loadConfiguration(ConfigDir, logger)
 	if config == nil {
@@ -1090,6 +1159,7 @@ func main() {
 		servers:      make(map[string]*http.Server),
 		moduleLogger: NewModuleLogger(),
 		modules:      make(map[string]Module),
+		pubKey:       pubKey,
 	}
 
 	server.Start()

@@ -1,53 +1,88 @@
-### 📝 Changelog – May 15, 2025
+# Changelog
 
-#### ✅ General Improvements
-- **Refactored `gubinnet.go`** into a single, self-contained file for easier deployment and management.
-- **Merged external modules** such as `logger` and `antiddos` directly into the main source file to eliminate dependency issues and simplify maintenance.
+All notable changes to this project will be documented in this file.
 
-#### 🧹 Code Cleanup & Fixes
-- **Fixed incorrect line breaks** in the PHP-CGI handler — corrected from `\r\n\r\n` parsing errors to ensure proper header-body separation.
-- **Updated logger calls** to match the expected signature: `logger.Info("message", map[string]interface{})`.
-- **Reorganized code blocks**, added comments, and improved overall readability and maintainability.
-
-#### 🔐 Security Enhancements
-- **Enhanced security middleware** to block access to known malicious paths such as `.env`, `/shell`, and WordPress setup scripts.
-- **Added request ID propagation** across all logs for better traceability of requests through systems.
-- **Improved error handling** with consistent logging of remote IPs, user agents, and unique request IDs.
-
-#### ⚙️ Logging
-- **Structured JSON logging** implemented throughout the application for easy parsing by log collectors (e.g., ELK, Loki).
-- **Automatic daily log rotation** ensures clean and manageable log files.
-- Logs now include rich metadata:
-  - Method, path, status, duration
-  - Remote IP, user agent
-  - Request ID for tracing
-
-#### 🛡 Anti-DDoS Integration
-- **Integrated rate limiting** to protect against DDoS attacks.
-- **IP banning mechanism** triggers when clients exceed a configurable number of requests per second.
-- **Logs blocked IPs** and banned connection attempts for auditing and monitoring purposes.
-
-#### 📁 Configuration Management
-- **Improved config parser** to skip invalid or missing root paths gracefully without crashing.
-- **Support for hot-reloading configuration** via the `SIGHUP` signal — no need to restart the server.
-
-#### 🌐 Server Functionality
-- **Dynamic virtual host management**: servers can be started, stopped, and reloaded on-the-fly.
-- **SNI-based HTTPS support**: each virtual host can have its own TLS certificate.
-- **PHP-CGI execution support** with full environment variable setup and header parsing.
-- **Reverse proxy improvements**:
-  - Full header forwarding
-  - Streaming response body
-  - Configurable timeout and streaming behavior
-
-#### 📦 Build & Deployment
-- The entire application is now **fully self-contained** and can be compiled with a single command:
-  ```bash
-  go build -o gubinnet gubinnet.go
-  ```
-- **Minimal dependencies**: only requires Prometheus and Google UUID libraries — everything else uses Go standard libraries.
-- Easy to deploy as a standalone binary with systemd, Docker, or orchestration tools.
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-This version represents a significant step forward in making GubinNET a robust, secure, and production-ready reverse proxy and web server.
+## [v1.6.0] - 2025-04-05
+
+### ✅ Added
+- **Security headers**: `X-Content-Type-Options`, `X-Frame-Options`, `X-XSS-Protection`, `Strict-Transport-Security`.
+- **Module signature verification** using Ed25519 to prevent unauthorized or tampered `.so` modules.
+- **Health and metrics endpoints**:
+  - `/healthz` – returns 200 OK for liveness checks.
+  - `/metrics` – exposes Prometheus metrics on port `:9090`.
+- **Profiling support** via `pprof` on port `:6060`.
+- **Safe path joining** with `safeJoin()` to prevent path traversal attacks.
+- **Docker compatibility** – ready for containerized deployment.
+- **Improved logging**:
+  - JSON-formatted logs with structured fields.
+  - Auto-rotation of access logs every 24 hours.
+- **Enhanced security middleware** with stricter regex filtering for malicious paths.
+
+### 🔒 Removed
+- **Dynamic C++ compilation at runtime** (`g++` execution) – removed `compileCppModule()` due to critical RCE vulnerability.
+- **Direct `exec.Command("g++")`** – no longer allowed in production to prevent arbitrary code execution.
+
+### 🛠 Fixed
+- **Path traversal vulnerability** – replaced `filepath.Join` + `filepath.Clean` with `safeJoin()` to enforce root directory isolation.
+- **Insecure module loading** – now requires valid `.so.sig` signature before loading any module.
+- **Weak DDoS protection** – improved tracking and banning logic with proper mutex locking and cleanup.
+- **Unsafe handling of `Host` header** – now uses `strings.Split` to safely extract hostname.
+- **Potential nil pointer dereference** in `serveFile()` when `fileInfo` is not provided.
+
+### ⚙️ Changed
+- **Modules must now be precompiled** – developers must manually compile `module.cpp` → `module.so` and sign it.
+- **Public key requirement** – server now requires `/etc/gubinnet/gubinnet.pub` for module verification.
+- **Configuration structure** – moved metrics and pprof to dedicated ports (`:9090`, `:6060`) to avoid conflicts.
+- **CGO module isolation** – although still in-process, modules are now verified and logged more strictly.
+- **Error pages** – updated version to `GubinNET/1.6.0` in HTML templates.
+- **Anti-DDoS log path** – now uses `/etc/gubinnet/logs/antiddos.log` instead of `/tmp`.
+
+### 📦 Dependencies
+- Added:
+  - `github.com/google/uuid` – for unique request IDs.
+  - `github.com/prometheus/client_golang` – for enhanced metrics.
+- Updated Go modules to latest secure versions.
+
+### 🧪 Improved Observability
+- **Prometheus metrics**:
+  - `http_requests_total`
+  - `http_request_duration_seconds`
+  - `http_active_connections`
+  - `module_executions_total`
+  - `module_errors_total`
+- **Structured logging** with request ID, duration, status, and user agent.
+- **pprof endpoint** for CPU, heap, and goroutine profiling.
+
+### 🐳 DevOps & Deployment
+- Ready for **Docker** and **Kubernetes**:
+  - Multi-stage Docker builds supported.
+  - Health checks via `/healthz`.
+  - Metrics ready for Prometheus scraping.
+- Supports **systemd** integration with graceful shutdown.
+
+---
+
+## [v1.5.1] - 2024-XX-XX
+
+*(Original version before major security overhaul)*
+
+### Added
+- Dynamic C++ module compilation (`g++` on-the-fly).
+- CGO module loading via `dlopen`.
+- Virtual hosts with SNI support.
+- Try-files for SPA routing.
+- Prometheus metrics (basic).
+- Anti-DDoS rate limiting.
+
+### Known Issues
+- Risk of RCE via `g++` execution.
+- No module signing or verification.
+- Path traversal possible in edge cases.
+- No health check endpoint.
+- No pprof or deep observability.
+
+---
