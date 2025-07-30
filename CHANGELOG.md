@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ---
 
-## [v1.6.0] - 2025-04-05
+## [v1.6.0] - 2025-07-30
 
 ### ✅ Added
 - **Security headers**: `X-Content-Type-Options`, `X-Frame-Options`, `X-XSS-Protection`, `Strict-Transport-Security`.
@@ -66,7 +66,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ---
 
-## [v1.5.1] - 2024-XX-XX
+## [v1.5.1] - 2025-04-05
 
 *(Original version before major security overhaul)*
 
