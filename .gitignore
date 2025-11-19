@@ -1,0 +1,16 @@
+```
+# Compiled and build artifacts
+*.o
+*.obj
+*.out
+
+# Dependencies
+go.sum
+
+# Logs and temp files
+*.log
+*.tmp
+
+# Editors
+.vscode/
+```

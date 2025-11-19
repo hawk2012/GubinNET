@@ -70,8 +70,18 @@ func (s *GubinServer) serveFileOrProxy(w http.ResponseWriter, r *http.Request, h
 		return
 	}
 
+	// Защита от Path Traversal атак
 	requestPath := filepath.Clean(strings.TrimLeft(r.URL.Path, "/"))
 	fullPath := filepath.Join(webRootPath, requestPath)
+	
+	// Проверяем, что результирующий путь находится внутри webRootPath
+	// для предотвращения выхода за пределы разрешенной директории
+	relPath, err := filepath.Rel(webRootPath, fullPath)
+	if err != nil || strings.HasPrefix(relPath, "..") {
+		s.serveErrorPage(w, r, http.StatusForbidden,
+			"Access Denied", "Path traversal attempt detected", requestID)
+		return
+	}
 
 	fileInfo, err := s.findFile(fullPath, host)
 	if err != nil {
@@ -122,49 +132,152 @@ func (s *GubinServer) findFile(fullPath string, host *config.VirtualHost) (fileI
 }
 
 func (s *GubinServer) handleProxy(w http.ResponseWriter, r *http.Request, proxyURL string, requestID string) {
-	targetURL, err := url.Parse(proxyURL + r.URL.String())
+	// Ограничиваем размер тела запроса (например, 10MB)
+	const maxBodySize = 10 << 20 // 10MB
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodySize)
+
+	// Валидация целевого URL
+	targetURL, err := url.Parse(proxyURL)
 	if err != nil {
 		s.serveErrorPage(w, r, http.StatusInternalServerError,
-			"Proxy configuration error", "", requestID)
+			"Proxy configuration error", "Invalid proxy URL", requestID)
+		return
+	}
+
+	// Проверка, что URL использует безопасные схемы
+	if targetURL.Scheme != "http" && targetURL.Scheme != "https" {
+		s.serveErrorPage(w, r, http.StatusInternalServerError,
+			"Proxy configuration error", "Invalid proxy URL scheme", requestID)
+		return
+	}
+
+	// Создаем безопасный путь для прокси
+	proxyPath := strings.TrimLeft(r.URL.Path, "/")
+	proxyURLWithTarget := strings.TrimRight(proxyURL, "/") + "/" + proxyPath
+	
+	// Добавляем параметры запроса
+	if r.URL.RawQuery != "" {
+		proxyURLWithTarget += "?" + r.URL.RawQuery
+	}
+
+	finalURL, err := url.Parse(proxyURLWithTarget)
+	if err != nil {
+		s.serveErrorPage(w, r, http.StatusInternalServerError,
+			"Proxy configuration error", "Invalid target URL", requestID)
+		return
+	}
+
+	// Проверяем, что целевой URL находится в пределах разрешенного домена
+	if finalURL.Host != targetURL.Host {
+		s.serveErrorPage(w, r, http.StatusInternalServerError,
+			"Proxy configuration error", "Target URL is not allowed", requestID)
 		return
 	}
 
 	// Создаем прокси-запрос
-	proxyReq, err := http.NewRequest(r.Method, targetURL.String(), r.Body)
+	proxyReq, err := http.NewRequest(r.Method, finalURL.String(), r.Body)
 	if err != nil {
 		s.serveErrorPage(w, r, http.StatusInternalServerError,
-			"Internal Server Error", "", requestID)
+			"Internal Server Error", "Failed to create proxy request", requestID)
 		return
 	}
 
-	// Копируем заголовки
+	// Копируем только безопасные заголовки
 	for key, values := range r.Header {
-		for _, value := range values {
-			proxyReq.Header.Add(key, value)
+		// Исключаем потенциально опасные заголовки
+		if !isUnsafeHeader(key) {
+			for _, value := range values {
+				proxyReq.Header.Add(key, value)
+			}
 		}
 	}
 
-	// Выполняем запрос
+	// Устанавливаем заголовки для идентификации прокси
+	proxyReq.Header.Set("X-Forwarded-For", s.getRealIP(r))
+	proxyReq.Header.Set("X-Forwarded-Host", r.Host)
+	proxyReq.Header.Set("X-Original-Host", targetURL.Host)
+
+	// Выполняем запрос с ограничениями
 	client := &http.Client{
-		Timeout: 10 * time.Second,
+		Timeout: 30 * time.Second, // Увеличен таймаут
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			// Ограничиваем количество редиректов
+			if len(via) >= 5 {
+				return fmt.Errorf("too many redirects")
+			}
+			// Проверяем, что редирект происходит на разрешенный хост
+			if req.URL.Host != targetURL.Host {
+				return fmt.Errorf("redirect to unauthorized host")
+			}
+			return nil
+		},
 	}
+	
 	resp, err := client.Do(proxyReq)
 	if err != nil {
 		s.serveErrorPage(w, r, http.StatusBadGateway,
-			"Bad Gateway", "", requestID)
+			"Bad Gateway", "Failed to connect to upstream server", requestID)
 		return
 	}
 	defer resp.Body.Close()
 
-	// Копируем заголовки ответа
+	// Копируем только безопасные заголовки ответа
 	for key, values := range resp.Header {
-		for _, value := range values {
-			w.Header().Add(key, value)
+		if !isUnsafeResponseHeader(key) {
+			for _, value := range values {
+				w.Header().Add(key, value)
+			}
 		}
 	}
 
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
+}
+
+// isUnsafeHeader проверяет, является ли заголовок потенциально опасным
+func isUnsafeHeader(header string) bool {
+	unsafeHeaders := map[string]bool{
+		"Connection":          true,
+		"Keep-Alive":          true,
+		"Proxy-Authenticate":  true,
+		"Proxy-Authorization": true,
+		"Te":                  true,
+		"Trailers":            true,
+		"Transfer-Encoding":   true,
+		"Upgrade":             true,
+	}
+	
+	header = strings.ToLower(header)
+	for unsafe := range unsafeHeaders {
+		if strings.ToLower(unsafe) == header {
+			return true
+		}
+	}
+	return false
+}
+
+// isUnsafeResponseHeader проверяет, является ли заголовок ответа потенциально опасным
+func isUnsafeResponseHeader(header string) bool {
+	unsafeHeaders := map[string]bool{
+		"Set-Cookie":           true,
+		"Access-Control-*":     true, // wildcard для заголовков CORS
+		"Content-Security-Policy": true,
+	}
+	
+	header = strings.ToLower(header)
+	for unsafe := range unsafeHeaders {
+		if strings.ToLower(unsafe) == header {
+			return true
+		}
+		// Проверка на шаблон (например, для CORS заголовков)
+		if strings.Contains(unsafe, "*") {
+			pattern := strings.Replace(unsafe, "*", "", -1)
+			if strings.Contains(header, pattern) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (s *GubinServer) serveFile(w http.ResponseWriter, r *http.Request, filePath string, fileInfo os.FileInfo, requestID string) {
@@ -204,6 +317,19 @@ func (s *GubinServer) serveErrorPage(w http.ResponseWriter, r *http.Request, sta
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(statusCode)
 
+	// В production окружении не показываем детали ошибки пользователю
+	var detailsHTML string
+	if statusCode < 500 && details != "" {
+		// Показываем детали только для ошибок клиента
+		detailsHTML = fmt.Sprintf("<p>Details: %s</p>", details)
+	} else if statusCode >= 500 {
+		// Для ошибок сервера показываем общее сообщение без деталей
+		detailsHTML = "<p>An internal server error occurred.</p>"
+	} else {
+		// Для других ошибок показываем пустую строку
+		detailsHTML = ""
+	}
+
 	html := fmt.Sprintf(`
 <!DOCTYPE html>
 <html lang="en">
@@ -220,11 +346,11 @@ func (s *GubinServer) serveErrorPage(w http.ResponseWriter, r *http.Request, sta
 <body>
     <h1>Error %d</h1>
     <p>%s</p>
-    <p>Details: %s</p>
+    %s
     <p>Server: GubinNET/2.0.0</p>
     <p>Request ID: %s</p>
 </body>
-</html>`, statusCode, statusCode, message, details, requestID)
+</html>`, statusCode, statusCode, message, detailsHTML, requestID)
 
 	w.Write([]byte(html))
 }
