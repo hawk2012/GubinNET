@@ -9,6 +9,7 @@ GubinNET is a lightweight, high-performance reverse proxy and web server written
 ✅ Built-in DDoS protection  
 ✅ Prometheus metrics  
 ✅ HTTPS with SNI support  
+✅ Enhanced security features  
 
 It's ideal for hosting multiple applications on the same server while maintaining performance, security, and simplicity.
 
@@ -27,8 +28,20 @@ It's ideal for hosting multiple applications on the same server while maintainin
 | **Structured Logging** | JSON logs with rich metadata |
 | **Prometheus Metrics** | Expose `/metrics` endpoint for monitoring |
 | **Hot Reload** | Send `SIGHUP` to reload configuration without restart |
+| **Enhanced Security** | Path traversal protection, header filtering, request size limits |
 
 ---
+
+## 🛡 Enhanced Security Features
+
+GubinNET now includes several enhanced security measures:
+
+- **Path Traversal Protection**: Prevents directory traversal attacks using `filepath.Rel()` validation
+- **Secure Proxy Handling**: Validates target URLs, filters unsafe headers, limits redirects, and enforces request size limits
+- **Information Leakage Prevention**: Hides internal error details in production environments
+- **Request Size Limiting**: Limits request body size to prevent resource exhaustion
+- **Header Filtering**: Blocks potentially dangerous headers during proxy operations
+- **Cache Size Management**: Prevents cache-related DoS attacks with size limits and eviction policies
 
 ## 🧩 AppModes
 
@@ -334,3 +347,5 @@ Feel free to submit PRs or open issues for feature suggestions and bug reports.
 > ✅ Keep it simple.  
 > ✅ Run everything behind one fast proxy.  
 > ✅ No need for Nginx or Apache anymore.
+> ✅ Modern admin panel for easy management.
+> ✅ SQLite-based configuration for enhanced security.

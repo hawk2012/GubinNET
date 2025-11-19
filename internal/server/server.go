@@ -46,14 +46,24 @@ func New(cfg *config.Config, logger *logging.Logger) (*GubinServer, error) {
 	// Запуск системных метрик
 	metrics.StartSystemMetrics()
 
-	return &GubinServer{
+	srv := &GubinServer{
 		config:   cfg,
 		logger:   logger,
 		antiDDoS: antiDDoS,
 		cache:    cache,
 		modules:  moduleManager,
 		servers:  make(map[string]*http.Server),
-	}, nil
+	}
+
+	// Настройка админ-панели с SQLite и аутентификацией
+	if err := srv.SetupAdminRoutes(); err != nil {
+		logger.Error("Failed to setup admin routes", map[string]interface{}{
+			"error": err,
+		})
+		// Продолжаем работу, даже если админка не настроена
+	}
+
+	return srv, nil
 }
 
 // Start запускает сервер
