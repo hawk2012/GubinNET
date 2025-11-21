@@ -1,146 +1,85 @@
-## 📝 Changelog – October 8, 2025
+## 📝 Changelog – Node.js Website Constructor
 
 ### 🏗️ **Major Architectural Refactor**
 
-#### 🔄 **Complete Codebase Restructuring**
-- **Modular Architecture**: Split monolithic `gubinnet.go` into well-organized packages:
-  - `internal/config/` - Configuration management and parsing
-  - `internal/server/` - HTTP server core and request handling
-  - `internal/modules/` - Dynamic CGO module system
-  - `internal/logging/` - Structured logging with rotation
-  - `internal/security/` - Anti-DDoS and security middleware
-  - `internal/metrics/` - Prometheus metrics collection
-  - `pkg/utils/` - Reusable utility functions
+#### 🔄 **Complete Migration from Django to Node.js**
+- **Full Technology Stack Change**: Migrated from Python/Django to Node.js/Express
+- **Modern Architecture**: Implemented lightweight Node.js-based solution
+- **Performance Improvements**: Reduced resource consumption and improved response times
+- **Simplified Deployment**: Single-platform technology stack
 
-#### 🚀 **New Package Structure**
-```
-gubinnet/
-├── cmd/gubinnet/main.go          # Clean entry point
-├── internal/
-│   ├── config/                   # Configuration management
-│   ├── server/                   # HTTP server core
-│   ├── modules/                  # CGO module system
-│   ├── logging/                  # Structured logging
-│   ├── security/                 # Security features
-│   └── metrics/                  # Monitoring metrics
-└── pkg/utils/                    # Shared utilities
-```
+### ✅ **New Features**
 
-### ✅ **General Improvements**
+#### 🎯 **Website Management System**
+- **RESTful API**: Full CRUD operations for website management
+- **Template System**: Three pre-designed templates (Business, Portfolio, Blog)
+- **Content Management**: Dynamic content creation and editing
+- **Database Integration**: SQLite for efficient data storage
 
-#### 🎯 **Enhanced Configuration System**
-- **YAML/INI Support**: Flexible configuration format with environment variable overrides
-- **Hot Reloading**: Dynamic configuration updates via `SIGHUP` without downtime
-- **Validation**: Automatic validation of virtual host configurations and paths
-- **Default Values**: Sensible defaults with clear override mechanisms
+#### 🎨 **Template System**
+- **Business Template**: Professional business website layout
+- **Portfolio Template**: Creative showcase design
+- **Blog Template**: Content-focused blog layout
+- **Template Customization**: Easy theme selection and configuration
 
-#### 🔧 **Improved Build & Deployment**
-- **Standard Go Modules**: Proper dependency management with `go.mod`
-- **Single Binary**: Still compiles to standalone binary with `go build -o gubinnet ./cmd/gubinnet`
-- **Cross-Platform**: Enhanced compatibility across Linux, Windows, and macOS
-- **Docker Ready**: Optimized for containerized deployments
+#### 🔧 **Development & Build Tools**
+- **Vite Integration**: Modern frontend build system
+- **EJS Templates**: Server-side rendering with EJS
+- **NPM Scripts**: Comprehensive build and development scripts
+- **Static Asset Management**: Organized CSS, JS, and image assets
 
-### 🧹 **Code Quality & Maintainability**
+### 🛠️ **Technical Improvements**
 
-#### 📚 **Interface-Driven Design**
-- **Module Interface**: Standardized `Module` interface for extensibility
-- **Config Provider**: Pluggable configuration backends
-- **Cache Interface**: Abstract caching layer for different storage backends
+#### 📚 **Technology Stack**
+- **Node.js Backend**: Express.js framework for web server
+- **SQLite Database**: Better-sqlite3 for data persistence
+- **Bootstrap 5**: Responsive UI framework
+- **Modern JavaScript**: ES6+ features and best practices
 
-#### 🧪 **Testability Improvements**
-- **Dependency Injection**: All components accept interfaces for easy mocking
-- **Isolated Packages**: Each package can be tested independently
-- **Health Checks**: Built-in health endpoints for monitoring
+#### 🧪 **Architecture**
+- **API-First Design**: Clean REST API for all operations
+- **Modular Structure**: Organized file structure for maintainability
+- **Separation of Concerns**: Clear distinction between frontend and backend
+- **Scalable Design**: Architecture ready for future enhancements
 
-### 🔐 **Security Enhancements**
+### 🚀 **Performance Enhancements**
 
-#### 🛡️ **Advanced Security Middleware**
-- **Security Headers**: Automatic injection of security headers (CSP, HSTS, XSS Protection)
-- **Path Traversal Protection**: Enhanced detection of directory traversal attacks
-- **IP Whitelisting**: Configurable IP whitelist for Anti-DDoS system
-- **Request Sanitization**: Improved input validation and sanitization
+#### ⚡ **Optimizations**
+- **Lightweight Server**: Reduced memory footprint compared to Django
+- **Fast API Responses**: Optimized database queries and API endpoints
+- **Static Asset Serving**: Efficient static file handling
+- **Caching Ready**: Architecture prepared for caching mechanisms
 
-#### 🔒 **Enhanced Anti-DDoS System**
-- **Configurable Rate Limiting**: Dynamic requests-per-second limits
-- **IP Reputation**: Automatic blocking of malicious IPs with configurable durations
-- **Whitelist Management**: API for dynamic IP whitelist management
-- **Detailed Metrics**: Comprehensive monitoring of security events
+### 📊 **Project Structure**
 
-### 📊 **Monitoring & Observability**
+#### 📁 **Organized Folders**
+- `server.js` - Main Express.js server
+- `views/` - EJS templates for server-side rendering
+- `themes/templates/` - Website design templates
+- `public/` - Static assets (CSS, JS, images)
+- `vite.config.js` - Build configuration
 
-#### 📈 **Comprehensive Metrics**
-- **Prometheus Integration**: Native Prometheus metrics endpoint at `/metrics`
-- **HTTP Metrics**: Request duration, status codes, payload sizes
-- **Module Metrics**: Execution time, success rates, error types
-- **System Metrics**: Memory usage, goroutine count, cache performance
-- **Custom Metrics**: Extensible metrics collection framework
+#### 🛠️ **New Endpoints**
+- **Website API**: `GET/POST/PUT/DELETE /api/websites`
+- **Template System**: Dynamic template rendering
+- **Static Assets**: Optimized serving of CSS/JS/images
 
-#### 📋 **Structured Logging**
-- **JSON Format**: Machine-readable log format for ELK/Loki stacks
-- **Contextual Logging**: Request-scoped logging with trace IDs
-- **Performance Logging**: Detailed timing information for all operations
-- **Error Tracking**: Structured error logging with stack traces
+### 🔄 **Migration Benefits**
 
-### 🌐 **Server Functionality**
+#### 🎪 **From Django to Node.js**
+- **Simplified Dependencies**: Single runtime environment
+- **Faster Startup**: Reduced initialization time
+- **Easier Deployment**: Single technology stack
+- **Modern Tooling**: Access to latest JavaScript ecosystem
 
-#### 🎛️ **Enhanced Virtual Host Management**
-- **Dynamic Hosts**: Add/remove virtual hosts without restart
-- **SNI Support**: Proper TLS SNI for multiple certificates
-- **Proxy Improvements**: Enhanced reverse proxy with connection pooling
-- **SPA Support**: Improved Single Page Application routing
-
-#### 🔌 **Module System 2.0**
-- **Hot Loading**: Dynamic compilation and loading of C++ modules
-- **Health Checks**: Built-in module health monitoring
-- **Background Tasks**: Support for long-running module processes
-- **API Management**: REST API for module lifecycle management
-
-### ⚡ **Performance Optimizations**
-
-#### 💾 **Intelligent Caching**
-- **Memory Efficient**: Smart cache eviction policies
-- **TTL Support**: Time-based cache expiration
-- **Compression**: Gzip compression with caching
-- **Metrics Integration**: Cache hit/miss tracking
-
-#### 🚀 **Concurrency Improvements**
-- **Connection Pooling**: Efficient HTTP client connection reuse
-- **Graceful Shutdown**: Improved graceful shutdown with configurable timeouts
-- **Resource Management**: Better goroutine and memory management
-
-### 🔄 **New Features**
-
-#### 🎪 **API Endpoints**
-- **Health Check**: `GET /health` with system status
-- **Module Management**: `GET/POST/DELETE /api/modules`
-- **Metrics**: `GET /metrics` for Prometheus
-- **Server Stats**: Internal statistics endpoint
-
-#### 🛠️ **Developer Experience**
-- **Better Error Messages**: Descriptive error messages with solutions
-- **Configuration Validation**: Early detection of configuration issues
-- **Development Mode**: Enhanced logging and debugging features
-- **Comprehensive Documentation**: Inline documentation and examples
-
-### 📦 **Dependencies & Compatibility**
-
-#### 🔗 **Updated Dependencies**
-- **Prometheus Client**: Latest version with improved performance
-- **Go Version**: Compatible with Go 1.21+
-- **Standard Library**: Maximized use of standard library for stability
-
-#### 🔄 **Backward Compatibility**
-- **Configuration Files**: Backward compatible with existing INI configurations
-- **Module API**: Existing C++ modules work without modification
-- **CLI Arguments**: Maintained command-line interface compatibility
+#### 📦 **Simplified Tech Stack**
+- **No Python Required**: Pure JavaScript/Node.js environment
+- **Lighter Runtime**: Reduced system resource requirements
+- **NPM Ecosystem**: Access to extensive package library
+- **Vite Build System**: Fast, modern frontend development
 
 ---
 
-### 🎯 **Migration Notes**
+### 🎯 **Migration Summary**
 
-- **Configuration**: Existing INI files remain compatible, YAML format optional
-- **Modules**: All existing CGO modules continue to work unchanged
-- **Deployment**: Same deployment process with enhanced monitoring
-- **Monitoring**: New metrics available at `/metrics` endpoint
-
-This refactor represents a **complete modernization** of GubinNET, transforming it from a monolithic application into a professional-grade, production-ready web server and reverse proxy with enterprise-level features and maintainability.
+This refactor represents a **complete transformation** of the website constructor, changing from a Django-based system to a lightweight, efficient Node.js application. The new architecture provides better performance, easier maintenance, and a modern development experience while preserving all core functionality.
