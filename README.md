@@ -1,351 +1,68 @@
-# GubinNET – Go-based Reverse Proxy with PHP, Node.js, .NET and Static Hosting
-
-GubinNET is a lightweight, high-performance reverse proxy and web server written in Go. It supports:
-
-✅ Serving static files (SPA-ready)  
-✅ Running ASP.NET Core applications  
-✅ Running Node.js applications  
-✅ Proxied requests to external backend services  
-✅ Built-in DDoS protection  
-✅ Prometheus metrics  
-✅ HTTPS with SNI support  
-✅ Enhanced security features  
-
-It's ideal for hosting multiple applications on the same server while maintaining performance, security, and simplicity.
-
----
-
-## 📦 Features
-
-| Feature | Description |
-|--------|-------------|
-| **Reverse Proxy** | Route traffic to any HTTP backend service |
-| **Static File Server** | Serve HTML/CSS/JS files or host SPAs like React/Vue/Angular |
-| **ASP.NET Core Hosting** | Run `.dll` apps directly from config |
-| **Node.js Hosting** | Launch `app.js` or other scripts automatically |
-| **HTTPS / TLS** | Full SNI support with certificate per domain |
-| **DDoS Protection** | Rate-limiting and IP banning |
-| **Structured Logging** | JSON logs with rich metadata |
-| **Prometheus Metrics** | Expose `/metrics` endpoint for monitoring |
-| **Hot Reload** | Send `SIGHUP` to reload configuration without restart |
-| **Enhanced Security** | Path traversal protection, header filtering, request size limits |
-
----
-
-## 🛡 Enhanced Security Features
-
-GubinNET now includes several enhanced security measures:
-
-- **Path Traversal Protection**: Prevents directory traversal attacks using `filepath.Rel()` validation
-- **Secure Proxy Handling**: Validates target URLs, filters unsafe headers, limits redirects, and enforces request size limits
-- **Information Leakage Prevention**: Hides internal error details in production environments
-- **Request Size Limiting**: Limits request body size to prevent resource exhaustion
-- **Header Filtering**: Blocks potentially dangerous headers during proxy operations
-- **Cache Size Management**: Prevents cache-related DoS attacks with size limits and eviction policies
-
-## 🧩 AppModes
-
-You can define the behavior of each virtual host using `.ini` configuration files located in `/etc/gubinnet/config/`.
-
-### 1. `dotnet` – ASP.NET Core Applications
-
-```ini
-server_name=api.example.net
-listen_port=80
-app_mode=dotnet
-dll_path=/var/www/app/MyApp.dll
-internal_port=5000
-use_ssl=true
-cert_path=/etc/ssl/certs/api.example.net.crt
-key_path=/etc/ssl/private/api.example.net.key
-redirect_to_https=true
-```
-
-- Automatically starts `dotnet MyApp.dll` internally.
-- Requests are proxied to `localhost:5000`.
-- Environment variables set:
-  ```bash
-  ASPNETCORE_URLS=http://0.0.0.0:5000
-  ASPNETCORE_ENVIRONMENT=Production
-  ```
-
----
-
-### 2. `nodejs` – Node.js Applications
-
-```ini
-server_name=node-app.local
-listen_port=80
-app_mode=nodejs
-script_path=/var/www/nodeapp/app.js
-internal_port=3000
-use_ssl=true
-cert_path=/etc/ssl/certs/node-app.crt
-key_path=/etc/ssl/private/node-app.key
-redirect_to_https=true
-```
-
-- Runs `node app.js` as child process.
-- Routes all requests to `localhost:3000`.
-
----
-
-### 3. `proxy` – Reverse Proxy Mode
-
-```ini
-server_name=proxy.example.com
-listen_port=80
-app_mode=proxy
-proxy_url=http://internal-api:8080
-use_ssl=true
-cert_path=/etc/ssl/certs/proxy.example.com.crt
-key_path=/etc/ssl/private/proxy.example.com.key
-redirect_to_https=true
-```
-
-- All incoming requests are forwarded to `http://internal-api:8080`.
-
----
-
-### 4. `static` – Static Site Hosting
-
-```ini
-server_name=my-spa-site.local
-listen_port=80
-app_mode=static
-root_path=/var/www/my-spa
-try_files=index.html
-use_ssl=true
-cert_path=/etc/ssl/certs/my-spa-site.crt
-key_path=/etc/ssl/private/my-spa-site.key
-redirect_to_https=true
-```
-
-- Serves files from `/var/www/my-spa`
-- Fallback to `index.html` for SPA routing
-
----
+# GubinNet - Django-based Website Constructor
 
-## ⚙️ Installation
-
-### 1. Clone the repo
+GubinNet is a Django-based website constructor system similar to uCoz, designed to allow users to create and manage multiple websites with customizable templates and modular components.
 
-```bash
-git clone https://github.com/yourusername/gubinnet.git
-cd gubinnet
-```
+## Features
 
-### 2. Build the binary
+- **Multi-site management**: Create and manage multiple websites from a single interface
+- **Template system**: Support for custom templates with preview capabilities
+- **Modular components**: Add different modules to websites (shop, blog, gallery, etc.)
+- **SEO tools**: Built-in SEO optimization features
+- **User management**: Role-based user management for each site
+- **Shop module**: Integrated e-commerce functionality
+- **Page management**: Create and edit pages with rich text editor
 
-```bash
-go build -o gubinnet gubinnet.go
-```
+## Core Components
 
-### 3. Create directories
+### GubinNet Module (Core)
+The `gubinnet` module is the core of the system and provides all essential functionality:
+- Site and page management
+- Template system
+- Component architecture
+- SEO settings
+- User management
+- Shop module
 
-```bash
-sudo mkdir -p /etc/gubinnet/config
-sudo mkdir -p /etc/gubinnet/logs
-```
+This module can work independently and allows the website constructor to function autonomously. The `gubinnet` and related files can be removed from the repository when needed.
 
-### 4. Place your `.ini` config files inside `/etc/gubinnet/config`
+### Multi-site Constructor
+The main application that uses GubinNet as its core to provide a complete website construction platform.
 
----
+## Installation
 
-## 🛠️ Configuration Examples
+1. Clone the repository
+2. Install dependencies: `pip install -r requirements.txt`
+3. Run migrations: `python manage.py migrate`
+4. Create a superuser: `python manage.py createsuperuser`
+5. Initialize default components and templates: `python manage.py initialize_constructor`
+6. Start the development server: `python manage.py runserver`
 
-### ✅ ASP.NET Core
+## Usage
 
-```ini
-server_name=api.example.net
-listen_port=80
-app_mode=dotnet
-dll_path=/var/www/app/MyApp.dll
-internal_port=5000
-use_ssl=true
-cert_path=/etc/ssl/certs/api.example.net.crt
-key_path=/etc/ssl/private/api.example.net.key
-redirect_to_https=true
-```
+1. Access the admin panel at `/admin/` to manage sites, templates, and components
+2. Create a new site through the admin panel
+3. Add pages, customize templates, and install components
+4. Configure SEO settings and user management per site
 
-### ✅ Node.js
+## Architecture
 
-```ini
-server_name=node-app.local
-listen_port=80
-app_mode=nodejs
-script_path=/var/www/nodeapp/app.js
-internal_port=3000
-use_ssl=true
-cert_path=/etc/ssl/certs/node-app.crt
-key_path=/etc/ssl/private/node-app.key
-redirect_to_https=true
-```
+- **Sites**: Main entities representing individual websites
+- **Templates**: Reusable design templates that can be applied to sites
+- **Components**: Modular functionality that can be added to sites (shop, blog, etc.)
+- **Pages**: Individual pages within each site
+- **SEO Settings**: Search engine optimization configuration
+- **User Management**: Registration, authentication and user role management
+- **Shop Module**: E-commerce functionality with products and inventory
 
-### ✅ Reverse Proxy
-
-```ini
-server_name=proxy.example.com
-listen_port=80
-app_mode=proxy
-proxy_url=http://internal-api:8080
-use_ssl=true
-cert_path=/etc/ssl/certs/proxy.example.com.crt
-key_path=/etc/ssl/private/proxy.example.com.key
-redirect_to_https=true
-```
+## Management Commands
 
-### ✅ Static Website / SPA
-
-```ini
-server_name=my-spa-site.local
-listen_port=80
-app_mode=static
-root_path=/var/www/my-spa
-try_files=index.html
-use_ssl=true
-cert_path=/etc/ssl/certs/my-spa-site.crt
-key_path=/etc/ssl/private/my-spa-site.key
-redirect_to_https=true
-```
+- `initialize_constructor`: Creates default templates and components
 
----
+## Admin Access
 
-## 🚀 Run the server
-
-```bash
-./gubinnet
-```
-
-The server will start and load all hosts defined in `.ini` files.
-
----
-
-## 🔄 Hot Reload
+- URL: `/admin/`
+- Default credentials: admin / admin123 (change after first login)
 
-To reload configuration without restarting:
+## Development
 
-```bash
-kill -HUP $(pgrep gubinnet)
-```
-
----
-
-## 📊 Monitoring
-
-Metrics are available at:
-
-```
-http://localhost/metrics
-```
-
-Supports:
-- Total requests
-- Request duration
-- Active connections
-
----
-
-## 🔐 Security
-
-- Blocks known malicious paths:
-  ```
-  .env, /shell, /wordpress/wp-admin/setup-config.php, /device.rsp
-  ```
-- Logs every request with:
-  - Method, path, status
-  - Remote IP, User-Agent
-  - Unique request ID
-
----
-
-## 🐳 Docker Support
-
-Use this `Dockerfile`:
-
-```dockerfile
-FROM golang:1.21
-WORKDIR /app
-COPY . .
-RUN go build -o gubinnet gubinnet.go
-CMD ["./gubinnet"]
-```
-
-And this `docker-compose.yml`:
-
-```yaml
-version: '3'
-services:
-  gubinnet:
-    build: .
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - /etc/gubinnet:/etc/gubinnet
-```
-
----
-
-## 📁 Directory Structure
-
-```
-/etc/gubinnet/
-├── config/
-│   └── myapp.ini
-└── logs/
-    ├── access.log
-    └── antiddos.log
-```
-
----
-
-## 📋 Logs
-
-Logs are written in structured JSON format by default:
-
-```
-{
-  "timestamp": "2025-04-05T10:00:00Z",
-  "level": "INFO",
-  "message": "Request processed",
-  "method": "GET",
-  "path": "/",
-  "status": "200",
-  "remote": "192.168.1.1",
-  "user_agent": "curl/7.68.0",
-  "request_id": "abc123"
-}
-```
-
-Log rotation happens daily.
-
----
-
-## 🛡 Anti-DDoS
-
-Built-in rate limiting:
-
-- Default: 100 requests/sec
-- Ban duration: 60 seconds
-- Logs blocked IPs in `/etc/gubinnet/logs/antiddos.log`
-
----
-
-## 📄 License
-
-MIT License – see [LICENSE](LICENSE)
-
----
-
-## 🚀 Want to contribute?
-
-Feel free to submit PRs or open issues for feature suggestions and bug reports.
-
----
-
-> ✅ Keep it simple.  
-> ✅ Run everything behind one fast proxy.  
-> ✅ No need for Nginx or Apache anymore.
-> ✅ Modern admin panel for easy management.
-> ✅ SQLite-based configuration for enhanced security.
+The system is designed to be extensible. You can add new components, templates, and features by extending the core models and views.

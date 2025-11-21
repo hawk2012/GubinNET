@@ -1,0 +1,45 @@
+{% extends 'base.html' %}
+
+{% block title %}Мои сайты - GubinNet Constructor{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h1>Мои сайты</h1>
+    <a href="{% url 'gubinnet:site_create' %}" class="btn btn-primary">Создать сайт</a>
+</div>
+
+{% if sites %}
+    <div class="row">
+        {% for site in sites %}
+        <div class="col-md-6 col-lg-4 mb-4">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">{{ site.name }}</h5>
+                    <p class="card-text">
+                        <strong>Домен:</strong> {{ site.domain }}<br>
+                        <strong>Шаблон:</strong> {{ site.template }}<br>
+                        <strong>Статус:</strong> 
+                        {% if site.is_active %}
+                            <span class="text-success">Активен</span>
+                        {% else %}
+                            <span class="text-danger">Неактивен</span>
+                        {% endif %}
+                    </p>
+                    <div class="d-grid gap-2">
+                        <a href="{% url 'gubinnet:site_detail' site.id %}" class="btn btn-primary">Просмотреть</a>
+                        <a href="{% url 'gubinnet:site_edit' site.id %}" class="btn btn-outline-primary">Редактировать</a>
+                        <a href="{% url 'gubinnet:page_list' site.id %}" class="btn btn-outline-secondary">Страницы</a>
+                        <a href="{% url 'gubinnet:shop_module' site.id %}" class="btn btn-outline-info">Магазин</a>
+                        <a href="{% url 'gubinnet:seo_edit' site.id %}" class="btn btn-outline-warning">SEO</a>
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+{% else %}
+    <div class="alert alert-info">
+        У вас пока нет созданных сайтов. <a href="{% url 'gubinnet:site_create' %}">Создать первый сайт</a>
+    </div>
+{% endif %}
+{% endblock %}
