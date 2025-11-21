@@ -1,0 +1,83 @@
+{% extends 'base.html' %}
+
+{% block title %}Главная - Конструктор сайтов GubinNet{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-md-12">
+        <h1>Добро пожаловать в GubinNet Constructor</h1>
+        <p class="lead">Создавайте сайты быстро и удобно с нашим конструктором.</p>
+        
+        {% if user.is_authenticated %}
+            <a href="{% url 'gubinnet:site_create' %}" class="btn btn-primary">Создать сайт</a>
+            <a href="{% url 'gubinnet:site_list' %}" class="btn btn-secondary">Мои сайты</a>
+        {% else %}
+            <p>Пожалуйста, <a href="/admin/">войдите</a> в систему для создания сайтов.</p>
+        {% endif %}
+    </div>
+</div>
+
+{% if user.is_authenticated %}
+<div class="row mt-5">
+    <div class="col-md-12">
+        <h2>Ваши сайты</h2>
+        {% if sites %}
+            <div class="row">
+                {% for site in sites %}
+                <div class="col-md-4 mb-3">
+                    <div class="card">
+                        <div class="card-body">
+                            <h5 class="card-title">{{ site.name }}</h5>
+                            <p class="card-text">{{ site.domain }}</p>
+                            <a href="{% url 'gubinnet:site_detail' site.id %}" class="btn btn-primary">Просмотреть</a>
+                            <a href="{% url 'gubinnet:site_edit' site.id %}" class="btn btn-outline-primary">Редактировать</a>
+                        </div>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        {% else %}
+            <p>У вас пока нет созданных сайтов. <a href="{% url 'gubinnet:site_create' %}">Создать первый сайт</a></p>
+        {% endif %}
+    </div>
+</div>
+{% endif %}
+
+<div class="row mt-5">
+    <div class="col-md-6">
+        <h3>Доступные шаблоны</h3>
+        {% if templates %}
+            <div class="list-group">
+                {% for template in templates %}
+                <a href="{% url 'gubinnet:template_detail' template.id %}" class="list-group-item list-group-item-action">
+                    <div class="d-flex w-100 justify-content-between">
+                        <h5 class="mb-1">{{ template.name }}</h5>
+                    </div>
+                    <p class="mb-1">{{ template.description|truncatewords:10 }}</p>
+                </a>
+                {% endfor %}
+            </div>
+        {% else %}
+            <p>Нет доступных шаблонов</p>
+        {% endif %}
+    </div>
+    <div class="col-md-6">
+        <h3>Доступные компоненты</h3>
+        {% if components %}
+            <div class="list-group">
+                {% for component in components %}
+                <div class="list-group-item">
+                    <div class="d-flex w-100 justify-content-between">
+                        <h5 class="mb-1">{{ component.name }}</h5>
+                        <span class="badge bg-primary">{{ component.get_component_type_display }}</span>
+                    </div>
+                    <p class="mb-1">{{ component.description|truncatewords:10 }}</p>
+                </div>
+                {% endfor %}
+            </div>
+        {% else %}
+            <p>Нет доступных компонентов</p>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}
