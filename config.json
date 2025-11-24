@@ -1,0 +1,28 @@
+{
+  "port": "8080",
+  "public_dir": "public",
+  "rewrite_rules": {
+    "/api/(.*)": "/internal/api/$1",
+    "/blog/(.*)": "/wp-content/$1",
+    "/images/(.*)": "/assets/images/$1",
+    "/products/(.*)": "/products.php?category=$1",
+    "/user/(.*)": "/user.php?id=$1"
+  },
+  "antiddos": {
+    "enabled": true,
+    "max_requests": 100,
+    "window_seconds": 60,
+    "block_duration": 10,
+    "enable_captcha": false,
+    "challenge_enabled": true
+  },
+  "allowed_bots": [
+    "googlebot", "bingbot", "slurp", 
+    "duckduckbot", "baiduspider", "yandex",
+    "facebookexternalhit", "twitterbot"
+  ],
+  "blocked_ips": [],
+  "allowed_ips": [],
+  "max_file_size": 10485760,
+  "timeout": 30
+}
