@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -12,15 +13,16 @@ import (
 
 // GubinNET is a web server that supports multiple technologies
 type GubinNET struct {
-	Router        *mux.Router
-	Port          string
-	Security      *SecurityManager
-	RewriteEngine *RewriteEngine
-	HTMLHandler   *HTMLHandler
-	PHPHandler    *PHPHandler
-	NodeJSHandler *NodeJSHandler
-	DotNetHandler *DotNetHandler
-	Config        Config
+	Router             *mux.Router
+	Port               string
+	Security           *SecurityManager
+	RewriteEngine      *RewriteEngine
+	HTMLHandler        *HTMLHandler
+	PHPHandler         *PHPHandler
+	NodeJSHandler      *NodeJSHandler
+	DotNetHandler      *DotNetHandler
+	Config             Config
+	VirtualHostManager *VirtualHostManager
 }
 
 // NewGubinNET creates a new instance of the GubinNET server
@@ -34,22 +36,81 @@ func NewGubinNET(config Config) *GubinNET {
 	rewriteEngine := NewRewriteEngine()
 	rewriteEngine.LoadRulesFromConfig(config)
 	
-	// Create handlers for different technologies
+	// Connect to database and create virtual host manager
+	var virtualHostManager *VirtualHostManager
+	if config.Database.Host != "" {
+		db, err := config.ConnectDB()
+		if err != nil {
+			log.Printf("Failed to connect to database: %v", err)
+			log.Println("Running in single-host mode without virtual hosts")
+			// Create handlers with default public directory
+			htmlHandler := NewHTMLHandler(config.PublicDir)
+			phpHandler := NewPHPHandler(config.PublicDir)
+			nodeJSHandler := NewNodeJSHandler(config.PublicDir)
+			dotNetHandler := NewDotNetHandler(config.PublicDir)
+			
+			return &GubinNET{
+				Router:        router,
+				Port:          config.Port,
+				Security:      security,
+				RewriteEngine: rewriteEngine,
+				HTMLHandler:   htmlHandler,
+				PHPHandler:    phpHandler,
+				NodeJSHandler: nodeJSHandler,
+				DotNetHandler: dotNetHandler,
+				Config:        config,
+				VirtualHostManager: nil,
+			}
+		}
+		virtualHostManager = NewVirtualHostManager(db)
+	} else {
+		log.Println("No database configuration found, running in single-host mode")
+		// Create handlers with default public directory
+		htmlHandler := NewHTMLHandler(config.PublicDir)
+		phpHandler := NewPHPHandler(config.PublicDir)
+		nodeJSHandler := NewNodeJSHandler(config.PublicDir)
+		dotNetHandler := NewDotNetHandler(config.PublicDir)
+		
+		return &GubinNET{
+			Router:        router,
+			Port:          config.Port,
+			Security:      security,
+			RewriteEngine: rewriteEngine,
+			HTMLHandler:   htmlHandler,
+			PHPHandler:    phpHandler,
+			NodeJSHandler: nodeJSHandler,
+			DotNetHandler: dotNetHandler,
+			Config:        config,
+			VirtualHostManager: nil,
+		}
+	}
+	
+	// Get virtual host for default configuration (if any)
+	defaultVirtualHost, err := virtualHostManager.GetVirtualHostByDomain("") // Empty domain as default
+	if err != nil {
+		// If no default virtual host is found, use the config's public_dir
+		log.Println("No default virtual host found, using config public_dir")
+	} else {
+		config.PublicDir = defaultVirtualHost.PublicDir
+	}
+	
+	// Create handlers for different technologies with default or first virtual host directory
 	htmlHandler := NewHTMLHandler(config.PublicDir)
 	phpHandler := NewPHPHandler(config.PublicDir)
 	nodeJSHandler := NewNodeJSHandler(config.PublicDir)
 	dotNetHandler := NewDotNetHandler(config.PublicDir)
 	
 	return &GubinNET{
-		Router:        router,
-		Port:          config.Port,
-		Security:      security,
-		RewriteEngine: rewriteEngine,
-		HTMLHandler:   htmlHandler,
-		PHPHandler:    phpHandler,
-		NodeJSHandler: nodeJSHandler,
-		DotNetHandler: dotNetHandler,
-		Config:        config,
+		Router:             router,
+		Port:               config.Port,
+		Security:           security,
+		RewriteEngine:      rewriteEngine,
+		HTMLHandler:        htmlHandler,
+		PHPHandler:         phpHandler,
+		NodeJSHandler:      nodeJSHandler,
+		DotNetHandler:      dotNetHandler,
+		Config:             config,
+		VirtualHostManager: virtualHostManager,
 	}
 }
 
@@ -63,19 +124,60 @@ func (g *GubinNET) SetupRoutes() {
 	
 	// Setup routes for different technologies based on file extensions
 	g.Router.PathPrefix("/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Determine the virtual host based on the request host
+		var virtualHost *VirtualHost
+		var htmlHandler *HTMLHandler
+		var phpHandler *PHPHandler
+		var nodeJSHandler *NodeJSHandler
+		var dotNetHandler *DotNetHandler
+		
+		if g.VirtualHostManager != nil {
+			// Extract domain from request (remove port if present)
+			host := r.Host
+			if colonIndex := strings.Index(host, ":"); colonIndex != -1 {
+				host = host[:colonIndex]
+			}
+			
+			// Look up virtual host configuration from database
+			vh, err := g.VirtualHostManager.GetVirtualHostByDomain(host)
+			if err != nil {
+				log.Printf("Virtual host not found for domain %s: %v", host, err)
+				// Fall back to default configuration
+				virtualHost = nil
+				htmlHandler = g.HTMLHandler
+				phpHandler = g.PHPHandler
+				nodeJSHandler = g.NodeJSHandler
+				dotNetHandler = g.DotNetHandler
+			} else {
+				virtualHost = vh
+				// Create new handlers for this virtual host's directory
+				htmlHandler = NewHTMLHandler(virtualHost.PublicDir)
+				phpHandler = NewPHPHandler(virtualHost.PublicDir)
+				nodeJSHandler = NewNodeJSHandler(virtualHost.PublicDir)
+				dotNetHandler = NewDotNetHandler(virtualHost.PublicDir)
+			}
+		} else {
+			// Use default configuration
+			virtualHost = nil
+			htmlHandler = g.HTMLHandler
+			phpHandler = g.PHPHandler
+			nodeJSHandler = g.NodeJSHandler
+			dotNetHandler = g.DotNetHandler
+		}
+		
 		// Determine handler based on file extension or path
 		path := r.URL.Path
 		
 		switch {
 		case hasExtension(path, ".php"):
-			g.PHPHandler.ServeHTTP(w, r)
+			phpHandler.ServeHTTP(w, r)
 		case hasExtension(path, ".js") || hasExtension(path, ".mjs"):
-			g.NodeJSHandler.ServeHTTP(w, r)
+			nodeJSHandler.ServeHTTP(w, r)
 		case hasDotNetExtension(path):
-			g.DotNetHandler.ServeHTTP(w, r)
+			dotNetHandler.ServeHTTP(w, r)
 		default:
 			// For other requests, try HTML handler
-			g.HTMLHandler.ServeHTTP(w, r)
+			htmlHandler.ServeHTTP(w, r)
 		}
 	})
 }
@@ -126,10 +228,10 @@ func (g *GubinNET) Start() {
 }
 
 func main() {
-	// Load configuration
-	config, err := LoadConfig("config.json")
+	// Load configuration from gubinnet.conf
+	config, err := LoadConfig("gubinnet.conf")
 	if err != nil {
-		log.Printf("Error loading config: %v, using defaults", err)
+		log.Printf("Error loading config from gubinnet.conf: %v, using defaults", err)
 		config = DefaultConfig()
 	}
 	
