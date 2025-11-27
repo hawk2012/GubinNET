@@ -1,6 +1,6 @@
-# GubinNET - Advanced Go Web Server
+# GubinNET - Advanced Go Web Server with PostgreSQL Virtual Hosts
 
-GubinNET is a high-performance web server written in Go that serves as an alternative to Nginx. It supports multiple technologies including HTML, PHP, Node.js, and .NET, with comprehensive security features.
+GubinNET is a high-performance web server written in Go that serves as an alternative to Nginx. It supports multiple technologies including HTML, PHP, Node.js, and .NET, with comprehensive security features. Virtual host configurations are now stored in PostgreSQL for dynamic management.
 
 ## Features
 
@@ -12,7 +12,8 @@ GubinNET is a high-performance web server written in Go that serves as an altern
   - Directory traversal prevention
   - Content filtering
 - **URL Rewriting**: Apache mod_rewrite-like functionality
-- **Configurable**: JSON-based configuration system
+- **Database-Driven Configuration**: Virtual hosts stored in PostgreSQL
+- **Dynamic Virtual Hosts**: Add, modify, or remove virtual hosts without server restart
 - **High Performance**: Built on Go's efficient HTTP server
 
 ## Architecture
@@ -20,7 +21,7 @@ GubinNET is a high-performance web server written in Go that serves as an altern
 GubinNET is built with a modular architecture:
 
 - `main.go`: Entry point and server orchestration
-- `config.go`: Configuration management
+- `config.go`: Configuration management with PostgreSQL integration
 - `security.go`: Security features including Anti-DDoS and bot protection
 - `rewrite.go`: URL rewriting engine
 - `html_handler.go`: Static file serving
@@ -35,45 +36,53 @@ GubinNET is built with a modular architecture:
    ```bash
    go mod init gubinnet
    go get github.com/gorilla/mux
+   go get github.com/lib/pq
    ```
 
 ## Configuration
 
-GubinNET uses a JSON configuration file (`config.json`). If the file doesn't exist, default settings will be used.
+GubinNET uses a JSON configuration file (`gubinnet.conf`) that contains only database access settings. Virtual host configurations are stored in PostgreSQL.
 
-Example configuration:
+Example `gubinnet.conf`:
 ```json
 {
-  "port": "8080",
-  "public_dir": "public",
-  "rewrite_rules": {
-    "/api/(.*)": "/internal/api/$1",
-    "/blog/(.*)": "/wp-content/$1",
-    "/images/(.*)": "/assets/images/$1"
-  },
-  "antiddos": {
-    "enabled": true,
-    "max_requests": 100,
-    "window_seconds": 60,
-    "block_duration": 10,
-    "enable_captcha": false,
-    "challenge_enabled": true
-  },
-  "allowed_bots": [
-    "googlebot", "bingbot", "slurp", 
-    "duckduckbot", "baiduspider", "yandex"
-  ],
-  "blocked_ips": [],
-  "allowed_ips": [],
-  "max_file_size": 10485760,
-  "timeout": 30
+  "database": {
+    "host": "localhost",
+    "port": 5432,
+    "user": "gubinnet",
+    "password": "gubinnet",
+    "dbname": "gubinnet",
+    "sslmode": "disable"
+  }
 }
+```
+
+### PostgreSQL Database Setup
+
+Create the virtual hosts table in your PostgreSQL database:
+
+```sql
+CREATE TABLE virtual_hosts (
+    id SERIAL PRIMARY KEY,
+    domain VARCHAR(255) UNIQUE NOT NULL,
+    public_dir VARCHAR(500) NOT NULL,
+    port VARCHAR(10) DEFAULT '80',
+    enabled BOOLEAN DEFAULT true,
+    ssl_required BOOLEAN DEFAULT false,
+    ssl_cert VARCHAR(500),
+    ssl_key VARCHAR(500)
+);
+
+-- Example virtual host entries
+INSERT INTO virtual_hosts (domain, public_dir, port, enabled) VALUES
+('example.com', '/var/www/example', '80', true),
+('test.com', '/var/www/test', '80', true);
 ```
 
 ## Usage
 
-1. Create a `public` directory (or your configured public directory)
-2. Place your web files in the public directory
+1. Set up your PostgreSQL database with virtual host configurations
+2. Configure `gubinnet.conf` with database connection details
 3. Run the server:
    ```bash
    go run *.go
@@ -84,6 +93,7 @@ Example configuration:
 ### HTML/Static Files
 - Standard HTML, CSS, JavaScript files
 - Automatic index file detection (index.html, index.htm, etc.)
+- Virtual host-specific document roots
 
 ### PHP
 - Execute PHP files directly

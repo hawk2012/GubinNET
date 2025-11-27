@@ -1,10 +1,36 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io/ioutil"
 	"log"
+
+	_ "github.com/lib/pq"
 )
+
+// DBConfig represents the database configuration for GubinNET server
+type DBConfig struct {
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	User     string `json:"user"`
+	Password string `json:"password"`
+	DBName   string `json:"dbname"`
+	SSLMode  string `json:"sslmode"`
+}
+
+// VirtualHost represents a virtual host configuration
+type VirtualHost struct {
+	ID          int    `json:"id"`
+	Domain      string `json:"domain"`
+	PublicDir   string `json:"public_dir"`
+	Port        string `json:"port"`
+	Enabled     bool   `json:"enabled"`
+	SSLRequired bool   `json:"ssl_required"`
+	SSLCert     string `json:"ssl_cert"`
+	SSLKey      string `json:"ssl_key"`
+}
 
 // Config represents the configuration for GubinNET server
 type Config struct {
@@ -17,6 +43,12 @@ type Config struct {
 	AllowedIPs   []string          `json:"allowed_ips"`
 	MaxFileSize  int64             `json:"max_file_size"` // in bytes
 	Timeout      int               `json:"timeout"`       // in seconds
+	Database     DBConfig          `json:"database"`      // Database configuration for virtual hosts
+}
+
+// VirtualHostManager manages virtual hosts from database
+type VirtualHostManager struct {
+	db *sql.DB
 }
 
 // AntiDDoSConfig holds the configuration for anti-DDoS protection
@@ -116,4 +148,66 @@ func SaveConfig(config Config, filename string) error {
 	}
 
 	return ioutil.WriteFile(filename, data, 0644)
+}
+
+// ConnectDB connects to the database using the configuration
+func (c *Config) ConnectDB() (*sql.DB, error) {
+	psqlInfo := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
+		c.Database.Host, c.Database.Port, c.Database.User, c.Database.Password, c.Database.DBName, c.Database.SSLMode)
+	
+	db, err := sql.Open("postgres", psqlInfo)
+	if err != nil {
+		return nil, err
+	}
+
+	err = db.Ping()
+	if err != nil {
+		return nil, err
+	}
+
+	return db, nil
+}
+
+// NewVirtualHostManager creates a new VirtualHostManager
+func NewVirtualHostManager(db *sql.DB) *VirtualHostManager {
+	return &VirtualHostManager{db: db}
+}
+
+// GetVirtualHostByDomain retrieves a virtual host configuration by domain name
+func (vhm *VirtualHostManager) GetVirtualHostByDomain(domain string) (*VirtualHost, error) {
+	query := "SELECT id, domain, public_dir, port, enabled, ssl_required, ssl_cert, ssl_key FROM virtual_hosts WHERE domain = $1 AND enabled = true"
+	row := vhm.db.QueryRow(query, domain)
+
+	var vh VirtualHost
+	err := row.Scan(&vh.ID, &vh.Domain, &vh.PublicDir, &vh.Port, &vh.Enabled, &vh.SSLRequired, &vh.SSLCert, &vh.SSLKey)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("virtual host for domain %s not found", domain)
+		}
+		return nil, err
+	}
+
+	return &vh, nil
+}
+
+// GetAllVirtualHosts retrieves all enabled virtual hosts
+func (vhm *VirtualHostManager) GetAllVirtualHosts() ([]VirtualHost, error) {
+	query := "SELECT id, domain, public_dir, port, enabled, ssl_required, ssl_cert, ssl_key FROM virtual_hosts WHERE enabled = true"
+	rows, err := vhm.db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var virtualHosts []VirtualHost
+	for rows.Next() {
+		var vh VirtualHost
+		err := rows.Scan(&vh.ID, &vh.Domain, &vh.PublicDir, &vh.Port, &vh.Enabled, &vh.SSLRequired, &vh.SSLCert, &vh.SSLKey)
+		if err != nil {
+			return nil, err
+		}
+		virtualHosts = append(virtualHosts, vh)
+	}
+
+	return virtualHosts, nil
 }

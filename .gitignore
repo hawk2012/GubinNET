@@ -1,6 +1,32 @@
-The added file path appears to be corrupted or contains non-UTF-8 characters that don't represent a recognizable file pattern. Without clear information about what type of file this represents, and since there are no other standard build artifacts, dependency directories, or temporary files in the changes, no additional ignore rules are needed.
-
-The corrupted path doesn't match any common patterns that should be ignored by default, and adding a rule for it would be inappropriate without knowing its actual purpose.
-
 ```
+# Compiled and build artifacts
+*.o
+*.obj
+*.out
+
+# Dependencies
+vendor/
+
+# Logs and temp files
+*.log
+*.tmp
+*.swp
+
+# Environment
+.env
+.env.local
+*.env.*
+
+# Editors
+.vscode/
+.idea/
+
+# Distribution
+dist/
+build/
+target/
+
+# Go specific
+*.a
+*.so
 ```
