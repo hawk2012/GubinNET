@@ -56,7 +56,7 @@ type AntiDDoSConfig struct {
 	Enabled          bool `json:"enabled"`
 	MaxRequests      int  `json:"max_requests"`
 	WindowSeconds    int  `json:"window_seconds"`
-	BlockDuration    int  `json:"block_duration"`     // in minutes
+	BlockDuration    int  `json:"block_duration"` // in minutes
 	EnableCaptcha    bool `json:"enable_captcha"`
 	ChallengeEnabled bool `json:"challenge_enabled"` // JavaScript challenge
 }
@@ -80,7 +80,7 @@ func DefaultConfig() Config {
 			ChallengeEnabled: true,
 		},
 		AllowedBots: []string{
-			"googlebot", "bingbot", "slurp", 
+			"googlebot", "bingbot", "slurp",
 			"duckduckbot", "baiduspider", "yandex",
 		},
 		BlockedIPs:  []string{},
@@ -154,7 +154,7 @@ func SaveConfig(config Config, filename string) error {
 func (c *Config) ConnectDB() (*sql.DB, error) {
 	psqlInfo := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
 		c.Database.Host, c.Database.Port, c.Database.User, c.Database.Password, c.Database.DBName, c.Database.SSLMode)
-	
+
 	db, err := sql.Open("postgres", psqlInfo)
 	if err != nil {
 		return nil, err
@@ -210,4 +210,191 @@ func (vhm *VirtualHostManager) GetAllVirtualHosts() ([]VirtualHost, error) {
 	}
 
 	return virtualHosts, nil
+}
+
+// GetAllVirtualHostsIncludingDisabled retrieves all virtual hosts including disabled ones
+func (vhm *VirtualHostManager) GetAllVirtualHostsIncludingDisabled() ([]VirtualHost, error) {
+	query := "SELECT id, domain, public_dir, port, enabled, ssl_required, ssl_cert, ssl_key FROM virtual_hosts ORDER BY domain"
+	rows, err := vhm.db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var virtualHosts []VirtualHost
+	for rows.Next() {
+		var vh VirtualHost
+		err := rows.Scan(&vh.ID, &vh.Domain, &vh.PublicDir, &vh.Port, &vh.Enabled, &vh.SSLRequired, &vh.SSLCert, &vh.SSLKey)
+		if err != nil {
+			return nil, err
+		}
+		virtualHosts = append(virtualHosts, vh)
+	}
+
+	return virtualHosts, nil
+}
+
+// CreateVirtualHost creates a new virtual host
+func (vhm *VirtualHostManager) CreateVirtualHost(vh *VirtualHost) error {
+	query := `INSERT INTO virtual_hosts (domain, public_dir, port, enabled, ssl_required, ssl_cert, ssl_key) 
+			  VALUES ($1, $2, $3, $4, $5, $6, $7) 
+			  RETURNING id`
+
+	err := vhm.db.QueryRow(query,
+		vh.Domain, vh.PublicDir, vh.Port, vh.Enabled, vh.SSLRequired, vh.SSLCert, vh.SSLKey,
+	).Scan(&vh.ID)
+
+	if err != nil {
+		return fmt.Errorf("failed to create virtual host: %v", err)
+	}
+
+	log.Printf("Created virtual host: %s (ID: %d)", vh.Domain, vh.ID)
+	return nil
+}
+
+// UpdateVirtualHost updates an existing virtual host
+func (vhm *VirtualHostManager) UpdateVirtualHost(vh *VirtualHost) error {
+	query := `UPDATE virtual_hosts 
+			  SET domain = $1, public_dir = $2, port = $3, enabled = $4, ssl_required = $5, ssl_cert = $6, ssl_key = $7 
+			  WHERE id = $8`
+
+	result, err := vhm.db.Exec(query,
+		vh.Domain, vh.PublicDir, vh.Port, vh.Enabled, vh.SSLRequired, vh.SSLCert, vh.SSLKey, vh.ID,
+	)
+
+	if err != nil {
+		return fmt.Errorf("failed to update virtual host: %v", err)
+	}
+
+	rowsAffected, _ := result.RowsAffected()
+	if rowsAffected == 0 {
+		return fmt.Errorf("virtual host with ID %d not found", vh.ID)
+	}
+
+	log.Printf("Updated virtual host: %s (ID: %d)", vh.Domain, vh.ID)
+	return nil
+}
+
+// DeleteVirtualHost deletes a virtual host by ID
+func (vhm *VirtualHostManager) DeleteVirtualHost(id int) error {
+	// First get the domain for logging
+	var domain string
+	err := vhm.db.QueryRow("SELECT domain FROM virtual_hosts WHERE id = $1", id).Scan(&domain)
+	if err != nil {
+		return fmt.Errorf("virtual host not found: %v", err)
+	}
+
+	query := "DELETE FROM virtual_hosts WHERE id = $1"
+	result, err := vhm.db.Exec(query, id)
+	if err != nil {
+		return fmt.Errorf("failed to delete virtual host: %v", err)
+	}
+
+	rowsAffected, _ := result.RowsAffected()
+	if rowsAffected == 0 {
+		return fmt.Errorf("virtual host with ID %d not found", id)
+	}
+
+	log.Printf("Deleted virtual host: %s (ID: %d)", domain, id)
+	return nil
+}
+
+// DeleteVirtualHostByDomain deletes a virtual host by domain
+func (vhm *VirtualHostManager) DeleteVirtualHostByDomain(domain string) error {
+	query := "DELETE FROM virtual_hosts WHERE domain = $1"
+	result, err := vhm.db.Exec(query, domain)
+	if err != nil {
+		return fmt.Errorf("failed to delete virtual host: %v", err)
+	}
+
+	rowsAffected, _ := result.RowsAffected()
+	if rowsAffected == 0 {
+		return fmt.Errorf("virtual host for domain %s not found", domain)
+	}
+
+	log.Printf("Deleted virtual host: %s", domain)
+	return nil
+}
+
+// EnableVirtualHost enables a virtual host by domain
+func (vhm *VirtualHostManager) EnableVirtualHost(domain string) error {
+	query := "UPDATE virtual_hosts SET enabled = true WHERE domain = $1"
+	result, err := vhm.db.Exec(query, domain)
+	if err != nil {
+		return fmt.Errorf("failed to enable virtual host: %v", err)
+	}
+
+	rowsAffected, _ := result.RowsAffected()
+	if rowsAffected == 0 {
+		return fmt.Errorf("virtual host for domain %s not found", domain)
+	}
+
+	log.Printf("Enabled virtual host: %s", domain)
+	return nil
+}
+
+// DisableVirtualHost disables a virtual host by domain
+func (vhm *VirtualHostManager) DisableVirtualHost(domain string) error {
+	query := "UPDATE virtual_hosts SET enabled = false WHERE domain = $1"
+	result, err := vhm.db.Exec(query, domain)
+	if err != nil {
+		return fmt.Errorf("failed to disable virtual host: %v", err)
+	}
+
+	rowsAffected, _ := result.RowsAffected()
+	if rowsAffected == 0 {
+		return fmt.Errorf("virtual host for domain %s not found", domain)
+	}
+
+	log.Printf("Disabled virtual host: %s", domain)
+	return nil
+}
+
+// GetVirtualHostByID retrieves a virtual host by ID
+func (vhm *VirtualHostManager) GetVirtualHostByID(id int) (*VirtualHost, error) {
+	query := "SELECT id, domain, public_dir, port, enabled, ssl_required, ssl_cert, ssl_key FROM virtual_hosts WHERE id = $1"
+	row := vhm.db.QueryRow(query, id)
+
+	var vh VirtualHost
+	err := row.Scan(&vh.ID, &vh.Domain, &vh.PublicDir, &vh.Port, &vh.Enabled, &vh.SSLRequired, &vh.SSLCert, &vh.SSLKey)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("virtual host with ID %d not found", id)
+		}
+		return nil, err
+	}
+
+	return &vh, nil
+}
+
+// ImportFromNginx imports virtual hosts from nginx configuration
+func (vhm *VirtualHostManager) ImportFromNginx(nginxHosts []NginxVirtualHost) error {
+	for _, nh := range nginxHosts {
+		vh := &VirtualHost{
+			Domain:      nh.Domain,
+			PublicDir:   nh.PublicDir,
+			Port:        nh.Port,
+			Enabled:     true,
+			SSLRequired: nh.SSLEnabled,
+			SSLCert:     nh.SSLCertPath,
+			SSLKey:      nh.SSLKeyPath,
+		}
+
+		// Check if already exists
+		existing, err := vhm.GetVirtualHostByDomain(vh.Domain)
+		if err == nil {
+			// Update existing
+			vh.ID = existing.ID
+			if err := vhm.UpdateVirtualHost(vh); err != nil {
+				log.Printf("Failed to update %s: %v", vh.Domain, err)
+			}
+		} else {
+			// Create new
+			if err := vhm.CreateVirtualHost(vh); err != nil {
+				log.Printf("Failed to create %s: %v", vh.Domain, err)
+			}
+		}
+	}
+
+	return nil
 }
